@@ -13,13 +13,30 @@ Project repository: https://github.com/ROCm/TheRock
 This is a meta-workspace. Actual source and build directories are scattered
 across the filesystem and referenced by absolute paths.
 
-**Important:** Use relative paths when editing files.
+This workspace can be active in two environments. Claude detects which one
+applies from the current working directory at session start.
 
-For example:
+### Windows (VSCode / Claude Desktop App)
 
-- This meta-workspace directory: `D:/projects/claude-rocm-workspace`
-- TheRock directory: `D:/projects/TheRock`
-- Relative path to edit a file in TheRock: `../TheRock/docs/development/README.md`
+- Meta-workspace: `C:/Project/Claude-Projects/claude-rocm-workspace`
+- TheRock local reference: `C:/Project/Claude-Projects/TheRock-main`
+- Scratch directory: `C:/scratch/claude`
+- Relative path to edit a file in TheRock: `../TheRock-main/docs/development/README.md`
+
+Windows is used for code review, analysis, and planning. Builds do NOT run
+here — all build work happens on the remote Linux machine.
+
+### Remote Linux (amd@dell-rack-13)
+
+- Meta-workspace: `~/Nirmal/Claude-workspace/`
+- Reference code (read-only): `~/Nirmal/Claude-workspace/ref-code/TheRock`
+- Active work: `~/Nirmal/Claude-workspace/workspace/TheRock`
+- Build tree: `~/Nirmal/Claude-workspace/workspace/therock-build`
+- Scratch directory: `~/Nirmal/Claude-workspace/workspace/scratch`
+- Third-party sources: `~/Nirmal/Claude-workspace/ref-code/third-party/`
+
+`ref-code/` is kept in sync with upstream via a daily cron job (see Remote
+Machine Setup section). All code changes and builds go under `workspace/`.
 
 ## Project Context
 
@@ -42,6 +59,7 @@ As a build infra team member, typical work involves:
 - Cross-platform build support
 - Build performance optimization
 - Package generation and distribution
+- Package generation include wheel, deb, rpm and tar ball
 
 ## Common Tasks
 
@@ -49,7 +67,7 @@ As a build infra team member, typical work involves:
 
 - Builds typically happen in separate build trees (see directory-map.md)
 - Out-of-tree builds are standard practice
-- Multiple build configurations (Release, Debug, RelWithDebInfo) often maintained simultaneously
+- Multiple build configurations (Release, Debug, RelWithDebInfo, asan, tsan) often maintained simultaneously
 
 How we build depends on what kind of task we are doing:
 
@@ -57,18 +75,22 @@ How we build depends on what kind of task we are doing:
 
 Good for making changes to the build infra when we aren't expecting to need to do C++ debugging.
 
+All build commands run on **amd@dell-rack-13** under `~/Nirmal/Claude-workspace/workspace/`.
+
 1. CMake configure:
 
-```
-cmake -B /develop/therock-build -S /develop/therock -GNinja -DTHEROCK_AMDGPU_FAMILIES=gfx1201 \
+```bash
+cmake -B ~/Nirmal/Claude-workspace/workspace/therock-build \
+  -S ~/Nirmal/Claude-workspace/workspace/TheRock \
+  -GNinja -DTHEROCK_AMDGPU_FAMILIES=gfx1201 \
   -DCMAKE_C_COMPILER_LAUNCHER=ccache \
   -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 ```
 
 2. Build entire project (very time consuming)
 
-```
-cd /develop/therock-build && ninja
+```bash
+cd ~/Nirmal/Claude-workspace/workspace/therock-build && ninja
 ```
 
 Configuring the project is often tricky. Rely on me to give you task specific instructions for configuration and incremental builds (or else you will initiate very long build time activities).
@@ -77,8 +99,8 @@ Configuring the project is often tricky. Rely on me to give you task specific in
 
 Often we have to work on specific subsets of ROCm. We do this with -DTHEROCK_ENABLE_* flags as described in TheRock/README.md. Once the project is configured for the proper subset, it is typical to iterate by expunging and rebuilding a specific named project. Example:
 
-```
-cd /develop/therock-build
+```bash
+cd ~/Nirmal/Claude-workspace/workspace/therock-build
 ninja clr+expunge && ninja clr+dist
 ```
 
@@ -95,21 +117,25 @@ ninja clr+expunge && ninja clr+dist
 
 ## Playbook
 
-Recipes for common multi-step operations. Scratch directory: `D:/scratch/claude`
-(large-file-friendly; switch if disk fills up).
+Recipes for common multi-step operations.
+
+Scratch directories (large-file-friendly; switch if disk fills up):
+- **Windows:** `C:/scratch/claude`
+- **Remote Linux:** `~/Nirmal/Claude-workspace/workspace/scratch`
 
 ### Download CI artifacts (without extracting)
 
 ```bash
 # 1. Find the latest successful run for an artifact group
-cd /d/projects/TheRock/build_tools && python find_latest_artifacts.py \
-  --artifact-group gfx110X-all -v
+# [Windows] cd /c/Project/Claude-Projects/TheRock-main/build_tools
+# [Linux]   cd ~/Nirmal/Claude-workspace/workspace/TheRock/build_tools
+python find_latest_artifacts.py --artifact-group gfx110X-all -v
 
 # 2. Download archives to scratch (note the run-id from step 1)
-cd /d/projects/TheRock/build_tools && python fetch_artifacts.py \
+python fetch_artifacts.py \
   --run-id=<RUN_ID> \
   --artifact-group=gfx110X-all \
-  --output-dir=/d/scratch/claude/artifacts/<RUN_ID> \
+  --output-dir=<SCRATCH>/artifacts/<RUN_ID> \
   --no-extract
 ```
 
@@ -124,23 +150,23 @@ are prefix-matched include filters.
 ```bash
 # 1. Download only the artifacts you need (prefix-match filters)
 #    Use --flatten to merge into a single install-prefix-like layout
-cd /d/projects/TheRock/build_tools && python fetch_artifacts.py \
+python fetch_artifacts.py \
   --run-id=<RUN_ID> \
   --artifact-group=gfx110X-all \
-  --output-dir=/d/scratch/claude/artifacts/<LABEL> \
+  --output-dir=<SCRATCH>/artifacts/<LABEL> \
   --flatten \
   "core-ocl_test" "core-ocl_run" "core-ocl_lib" "base_run" "base_lib"
 
 # 2. Explore the layout
-ls /d/scratch/claude/artifacts/<LABEL>/bin/
-ls /d/scratch/claude/artifacts/<LABEL>/tests/
+ls <SCRATCH>/artifacts/<LABEL>/bin/
+ls <SCRATCH>/artifacts/<LABEL>/tests/
 
 # 3. Rearrange files to test a hypothesis (e.g., "what if tests installed to bin/?")
-cp /d/scratch/claude/artifacts/<LABEL>/tests/ocltst/* \
-   /d/scratch/claude/artifacts/<LABEL>/bin/
+cp <SCRATCH>/artifacts/<LABEL>/tests/ocltst/* \
+   <SCRATCH>/artifacts/<LABEL>/bin/
 
-# 4. Run from the rearranged layout
-cd /d/scratch/claude/artifacts/<LABEL>/bin && ./ocltst.exe -m oclruntime.dll
+# 4. Run from the rearranged layout (Linux only — executables are ELF)
+cd <SCRATCH>/artifacts/<LABEL>/bin && ./ocltst -m oclruntime.so
 ```
 
 Notes:
@@ -193,11 +219,12 @@ Key principles across all languages:
 
 These conventions keep Bash tool calls consistent with the permission rules in `settings.local.json`, reducing unnecessary permission prompts.
 
-- **Paths**: Use MSYS2-style paths: `/d/projects/...` (not `D:/projects/...`). Read/Edit/Glob paths from the system use `D:\projects\...` regardless; this only applies to Bash tool calls.
+- **Paths (Windows)**: Use MSYS2-style paths `/c/Project/Claude-Projects/...` in Bash tool calls (not `C:/Project/...`). Read/Edit/Glob use Windows paths `C:\Project\...` — this only applies to Bash.
+- **Paths (Linux)**: Use standard Unix paths `~/Nirmal/Claude-workspace/...` or absolute `/home/amd/Nirmal/...`.
 - **Testing**: Use `python -m pytest <path>` (not bare `pytest`, not `python test_file.py`, not `cd <dir> && python -m pytest`). Passing the test path as an argument matches the single `python -m pytest:*` permission rule regardless of which directory the tests are in.
 - **Linting**: Use `pre-commit run` (not bare `pre-commit` or `python -m pre_commit`).
 - **Prefer separate tool calls over `&&` chains**: Permission matching treats `cmd1 && cmd2` as a single command string, so chained commands may not match individual rules. Use separate Bash tool calls when possible.
-- **Copy files into scratch before processing**: Files outside permissioned directories (e.g. `/mnt/c/...`, `~/.therock/`) trigger repeated permission prompts. Copy them into `/d/scratch/claude/` first, then work from there.
+- **Copy files into scratch before processing**: Files outside permissioned directories trigger repeated permission prompts. Copy them into the scratch directory first (`C:/scratch/claude/` on Windows, `~/Nirmal/Claude-workspace/workspace/scratch/` on Linux).
 
 ### Git Workflow
 
@@ -207,15 +234,18 @@ Use the pattern: `users/<username>/<short-description>`
 
 Examples:
 
-- `users/scotttodd/add-simde-third-party`
-- `users/scotttodd/fix-cmake-detection`
+- `users/nunnikri/add-simde-third-party`
+- `users/nunnikri/fix-cmake-detection`
 
 #### Creating a Branch and Committing
 
 ```bash
 # Create and switch to a new branch
-cd /develop/therock
-git checkout -b users/scotttodd/<description>
+# [Linux] cd ~/Nirmal/Claude-workspace/workspace/TheRock
+git checkout -b users/nunnikri/<description>
+
+#Run pre-commit
+pre-commit run --show-diff-on-failure --color=always --all-files
 
 # Stage changes
 git add <files>
@@ -232,9 +262,6 @@ Changes:
 
 Additional context or testing notes.
 
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-
-Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
 )"
 
@@ -277,7 +304,8 @@ git log -1 --stat
 
 - Use `git -C <path>` instead of `cd <path> && git ...`
 - This matches existing Bash permission rules and avoids unnecessary permission prompts
-- Example: `git -C /d/projects/TheRock log --oneline -10` (not `cd /d/projects/TheRock && git log --oneline -10`)
+- Example (Linux): `git -C ~/Nirmal/Claude-workspace/workspace/TheRock log --oneline -10`
+- Example (Windows): `git -C /c/Project/Claude-Projects/TheRock-main log --oneline -10`
 
 ### Review Workflow
 
@@ -316,6 +344,7 @@ Do a style review of my changes
 
 ```bash
 # Comprehensive review (all aspects)
+
 /review-pr https://github.com/ROCm/TheRock/pull/2761
 
 # Focused reviews
@@ -379,16 +408,76 @@ Track work items in `tasks/active/`.
 
 ### Tools
 
-- [List common tools: compilers, rocm-cmake, etc.]
+- `cmake` / `ninja` — build system (Linux only for ROCm builds)
+- `ccache` — compiler cache (speeds up incremental builds)
+- `clang` / `clang++` — primary compiler for ROCm components
+- `clang-format` — C/C++ formatter (enforced by pre-commit)
+- `pre-commit` — runs all linters/formatters before commit
+- `python3` — build scripts, artifact tools, kpack tooling
+- `gh` — GitHub CLI for PR management and artifact queries
+- `readelf` / `objcopy` / `objdump` — ELF inspection and manipulation
+- `dwz` — DWARF debuginfo compressor (runs during Debian packaging via `dh_dwz`)
+- `strip` — symbol stripping (part of packaging pipeline)
 
 ## Reference
 
 - [ROCm Documentation](https://rocm.docs.amd.com/)
 - [TheRock repository](https://github.com/ROCm/TheRock)
 
+## Remote Machine Setup
+
+### Machine: `amd@dell-rack-13`
+
+Layout:
+
+```
+~/Nirmal/Claude-workspace/
+├── ref-code/                    ← read-only knowledge base
+│   ├── TheRock/                 ← git clone with all submodules (--recursive)
+│   │   ├── rocm-systems/        ← submodule
+│   │   └── rocm-libraries/     ← submodule
+│   └── third-party/            ← extracted sources (one-time download)
+│       ├── boost-1.87.0/
+│       ├── Catch2-3.8.1/
+│       └── ...                 ← see fetch_third_party.sh for full list
+└── workspace/                  ← all active work here
+    ├── TheRock/                ← working clone (branches, commits)
+    ├── therock-build/          ← CMake build tree
+    └── scratch/                ← large temporary files
+```
+
+### Daily sync (cron on dell-rack-13)
+
+Syncs `ref-code/TheRock` with upstream main every day at 06:00:
+
+```bash
+# crontab -e entry:
+0 6 * * * cd ~/Nirmal/Claude-workspace/ref-code/TheRock && \
+  git pull --ff-only >> ~/Nirmal/Claude-workspace/ref-code/sync.log 2>&1 && \
+  git submodule update --recursive >> ~/Nirmal/Claude-workspace/ref-code/sync.log 2>&1 && \
+  echo "$(date): sync complete" >> ~/Nirmal/Claude-workspace/ref-code/sync.log
+```
+
+Check status: `tail -20 ~/Nirmal/Claude-workspace/ref-code/sync.log`
+
+### Safety restrictions
+
+Unless explicitly asked, Claude must NOT on the remote machine:
+
+- `git push` any branch
+- Delete files (`rm -rf` or bulk deletion)
+- Install packages (`pip install`, `apt install`, `npm install`, etc.)
+- Execute untrusted binaries from the repository
+- Run build systems (`cmake --build`, `ninja`, `make`) — exception: static analysis only
+- Run arbitrary scripts from the repo (`./scripts/foo.sh` etc.)
+- Execute containers (`docker run`, etc.)
+- Modify infrastructure (Terraform, cloud CLI write ops)
+- Access or print external secrets
+- Perform network fuzzing or active exploitation
+- Open pull requests automatically (`gh pr create`, `gh pr merge`)
+
 ## Notes
 
-[Add your ongoing notes, discoveries, and context here as you work]
 - Note that TheRock is a super-project. The builds under the submodules (like rocm-systems) are sub-projects. Since dependency management is handled by the super-project, you want to refer to those build rules. For example, in the case of ROCR-Runtime and clr, see the `core/CMakeLists.txt` file. This is documented in docs/development/build_system.md.
 - Never do `git push` without explicit authorization.
 - Do not amend commits without explicit authorization. Stage changes and ask for reviews before commiting.
