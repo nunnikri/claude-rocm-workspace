@@ -26,17 +26,16 @@ applies from the current working directory at session start.
 Windows is used for code review, analysis, and planning. Builds do NOT run
 here — all build work happens on the remote Linux machine.
 
-### Remote Linux (amd@dell-rack-13)
+### Remote Linux (nirmal@dell-rack-13)
 
-- Meta-workspace: `~/Nirmal/Claude-workspace/`
-- Reference code (read-only): `~/Nirmal/Claude-workspace/ref-code/TheRock`
-- Active work: `~/Nirmal/Claude-workspace/workspace/TheRock`
-- Build tree: `~/Nirmal/Claude-workspace/workspace/therock-build`
-- Scratch directory: `~/Nirmal/Claude-workspace/workspace/scratch`
-- Third-party sources: `~/Nirmal/Claude-workspace/ref-code/third-party/`
+- Workspace root: `~/Project/Claude-Workspace/`
+- TheRock source: `~/Project/Claude-Workspace/TheRock`
+- Build tree: `~/Project/Claude-Workspace/therock-build`
+- Scratch directory: `~/Project/Claude-Workspace/scratch`
+- Scripts: `~/Project/Claude-Workspace/scripts/`
 
-`ref-code/` is kept in sync with upstream via a daily cron job (see Remote
-Machine Setup section). All code changes and builds go under `workspace/`.
+TheRock is cloned with all submodules under the workspace root. All active
+work (branches, builds, scratch files) lives under `~/Project/Claude-Workspace/`.
 
 ## Project Context
 
@@ -75,13 +74,13 @@ How we build depends on what kind of task we are doing:
 
 Good for making changes to the build infra when we aren't expecting to need to do C++ debugging.
 
-All build commands run on **amd@dell-rack-13** under `~/Nirmal/Claude-workspace/workspace/`.
+All build commands run on **nirmal@dell-rack-13** under `~/Project/Claude-Workspace/`.
 
 1. CMake configure:
 
 ```bash
-cmake -B ~/Nirmal/Claude-workspace/workspace/therock-build \
-  -S ~/Nirmal/Claude-workspace/workspace/TheRock \
+cmake -B ~/Project/Claude-Workspace/therock-build \
+  -S ~/Project/Claude-Workspace/TheRock \
   -GNinja -DTHEROCK_AMDGPU_FAMILIES=gfx1201 \
   -DCMAKE_C_COMPILER_LAUNCHER=ccache \
   -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -90,7 +89,7 @@ cmake -B ~/Nirmal/Claude-workspace/workspace/therock-build \
 2. Build entire project (very time consuming)
 
 ```bash
-cd ~/Nirmal/Claude-workspace/workspace/therock-build && ninja
+cd ~/Project/Claude-Workspace/therock-build && ninja
 ```
 
 Configuring the project is often tricky. Rely on me to give you task specific instructions for configuration and incremental builds (or else you will initiate very long build time activities).
@@ -100,7 +99,7 @@ Configuring the project is often tricky. Rely on me to give you task specific in
 Often we have to work on specific subsets of ROCm. We do this with -DTHEROCK_ENABLE_* flags as described in TheRock/README.md. Once the project is configured for the proper subset, it is typical to iterate by expunging and rebuilding a specific named project. Example:
 
 ```bash
-cd ~/Nirmal/Claude-workspace/workspace/therock-build
+cd ~/Project/Claude-Workspace/therock-build
 ninja clr+expunge && ninja clr+dist
 ```
 
@@ -121,14 +120,14 @@ Recipes for common multi-step operations.
 
 Scratch directories (large-file-friendly; switch if disk fills up):
 - **Windows:** `C:/scratch/claude`
-- **Remote Linux:** `~/Nirmal/Claude-workspace/workspace/scratch`
+- **Remote Linux:** `~/Project/Claude-Workspace/scratch`
 
 ### Download CI artifacts (without extracting)
 
 ```bash
 # 1. Find the latest successful run for an artifact group
 # [Windows] cd /c/Project/Claude-Projects/TheRock-main/build_tools
-# [Linux]   cd ~/Nirmal/Claude-workspace/workspace/TheRock/build_tools
+# [Linux]   cd ~/Project/Claude-Workspace/TheRock/build_tools
 python find_latest_artifacts.py --artifact-group gfx110X-all -v
 
 # 2. Download archives to scratch (note the run-id from step 1)
@@ -220,11 +219,11 @@ Key principles across all languages:
 These conventions keep Bash tool calls consistent with the permission rules in `settings.local.json`, reducing unnecessary permission prompts.
 
 - **Paths (Windows)**: Use MSYS2-style paths `/c/Project/Claude-Projects/...` in Bash tool calls (not `C:/Project/...`). Read/Edit/Glob use Windows paths `C:\Project\...` — this only applies to Bash.
-- **Paths (Linux)**: Use standard Unix paths `~/Nirmal/Claude-workspace/...` or absolute `/home/amd/Nirmal/...`.
+- **Paths (Linux)**: Use standard Unix paths `~/Project/Claude-Workspace/...` or absolute `/home/nirmal/Project/Claude-Workspace/...`.
 - **Testing**: Use `python -m pytest <path>` (not bare `pytest`, not `python test_file.py`, not `cd <dir> && python -m pytest`). Passing the test path as an argument matches the single `python -m pytest:*` permission rule regardless of which directory the tests are in.
 - **Linting**: Use `pre-commit run` (not bare `pre-commit` or `python -m pre_commit`).
 - **Prefer separate tool calls over `&&` chains**: Permission matching treats `cmd1 && cmd2` as a single command string, so chained commands may not match individual rules. Use separate Bash tool calls when possible.
-- **Copy files into scratch before processing**: Files outside permissioned directories trigger repeated permission prompts. Copy them into the scratch directory first (`C:/scratch/claude/` on Windows, `~/Nirmal/Claude-workspace/workspace/scratch/` on Linux).
+- **Copy files into scratch before processing**: Files outside permissioned directories trigger repeated permission prompts. Copy them into the scratch directory first (`C:/scratch/claude/` on Windows, `~/Project/Claude-Workspace/scratch/` on Linux).
 
 ### Git Workflow
 
@@ -241,7 +240,7 @@ Examples:
 
 ```bash
 # Create and switch to a new branch
-# [Linux] cd ~/Nirmal/Claude-workspace/workspace/TheRock
+# [Linux] cd ~/Project/Claude-Workspace/TheRock
 git checkout -b users/nunnikri/<description>
 
 #Run pre-commit
@@ -304,7 +303,7 @@ git log -1 --stat
 
 - Use `git -C <path>` instead of `cd <path> && git ...`
 - This matches existing Bash permission rules and avoids unnecessary permission prompts
-- Example (Linux): `git -C ~/Nirmal/Claude-workspace/workspace/TheRock log --oneline -10`
+- Example (Linux): `git -C ~/Project/Claude-Workspace/TheRock log --oneline -10`
 - Example (Windows): `git -C /c/Project/Claude-Projects/TheRock-main log --oneline -10`
 
 ### Review Workflow
@@ -426,39 +425,33 @@ Track work items in `tasks/active/`.
 
 ## Remote Machine Setup
 
-### Machine: `amd@dell-rack-13`
+### Machine: `nirmal@dell-rack-13`
 
 Layout:
 
 ```
-~/Nirmal/Claude-workspace/
-├── ref-code/                    ← read-only knowledge base
-│   ├── TheRock/                 ← git clone with all submodules (--recursive)
-│   │   ├── rocm-systems/        ← submodule
-│   │   └── rocm-libraries/     ← submodule
-│   └── third-party/            ← extracted sources (one-time download)
-│       ├── boost-1.87.0/
-│       ├── Catch2-3.8.1/
-│       └── ...                 ← see fetch_third_party.sh for full list
-└── workspace/                  ← all active work here
-    ├── TheRock/                ← working clone (branches, commits)
-    ├── therock-build/          ← CMake build tree
-    └── scratch/                ← large temporary files
+~/Project/Claude-Workspace/
+├── TheRock/                ← working clone with all submodules (--recursive)
+│   ├── rocm-systems/       ← submodule
+│   └── rocm-libraries/    ← submodule
+├── therock-build/          ← CMake build tree (create as needed)
+├── scratch/                ← large temporary files (create as needed)
+└── scripts/                ← automation scripts (GitHub poller, mailer, etc.)
 ```
 
-### Daily sync (cron on dell-rack-13)
+### Daily sync (cron on nirmal@dell-rack-13)
 
-Syncs `ref-code/TheRock` with upstream main every day at 06:00:
+Syncs TheRock with upstream main every day at 06:00:
 
 ```bash
 # crontab -e entry:
-0 6 * * * cd ~/Nirmal/Claude-workspace/ref-code/TheRock && \
-  git pull --ff-only >> ~/Nirmal/Claude-workspace/ref-code/sync.log 2>&1 && \
-  git submodule update --recursive >> ~/Nirmal/Claude-workspace/ref-code/sync.log 2>&1 && \
-  echo "$(date): sync complete" >> ~/Nirmal/Claude-workspace/ref-code/sync.log
+0 6 * * * cd ~/Project/Claude-Workspace/TheRock && \
+  git pull --ff-only >> ~/Project/Claude-Workspace/TheRock/sync.log 2>&1 && \
+  git submodule update --recursive >> ~/Project/Claude-Workspace/TheRock/sync.log 2>&1 && \
+  echo "$(date): sync complete" >> ~/Project/Claude-Workspace/TheRock/sync.log
 ```
 
-Check status: `tail -20 ~/Nirmal/Claude-workspace/ref-code/sync.log`
+Check status: `tail -20 ~/Project/Claude-Workspace/TheRock/sync.log`
 
 ### Safety restrictions
 

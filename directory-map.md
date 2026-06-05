@@ -17,24 +17,16 @@ Builds do NOT run on Windows. This environment is for code review, analysis, and
 
 ---
 
-## Remote Linux (amd@dell-rack-13)
-
-### Reference (read-only, daily sync)
+## Remote Linux (nirmal@dell-rack-13)
 
 | Alias | Path | Notes |
 |-------|------|-------|
-| `ref-therock` | `~/Nirmal/Claude-workspace/ref-code/TheRock` | Upstream clone with all submodules |
-| `ref-rocm-systems` | `~/Nirmal/Claude-workspace/ref-code/TheRock/rocm-systems` | Submodule |
-| `ref-rocm-libraries` | `~/Nirmal/Claude-workspace/ref-code/TheRock/rocm-libraries` | Submodule |
-| `third-party` | `~/Nirmal/Claude-workspace/ref-code/third-party` | Extracted third-party sources |
-
-### Active work
-
-| Alias | Path | Notes |
-|-------|------|-------|
-| `therock` | `~/Nirmal/Claude-workspace/workspace/TheRock` | Working clone (feature branches here) |
-| `build` | `~/Nirmal/Claude-workspace/workspace/therock-build` | CMake build tree |
-| `scratch` | `~/Nirmal/Claude-workspace/workspace/scratch` | Large temporary files |
+| `therock` | `~/Project/Claude-Workspace/TheRock` | Working clone with all submodules |
+| `rocm-systems` | `~/Project/Claude-Workspace/TheRock/rocm-systems` | Submodule |
+| `rocm-libraries` | `~/Project/Claude-Workspace/TheRock/rocm-libraries` | Submodule |
+| `build` | `~/Project/Claude-Workspace/therock-build` | CMake build tree (create as needed) |
+| `scratch` | `~/Project/Claude-Workspace/scratch` | Large temporary files (create as needed) |
+| `scripts` | `~/Project/Claude-Workspace/scripts` | Automation scripts (poller, mailer, etc.) |
 
 ---
 
