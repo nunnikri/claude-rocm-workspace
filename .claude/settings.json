@@ -4,7 +4,15 @@
       "Read",
       "Glob",
       "Grep",
-      "WebFetch"
+      "WebFetch",
+      "Bash(gh pr view*)",
+      "Bash(gh pr diff*)",
+      "Bash(gh issue view*)",
+      "Bash(gh api GET *)",
+      "Bash(gh api repos*)",
+      "Bash(gh auth status*)",
+      "Bash(/c/Program Files/GitHub CLI/gh.exe api GET*)",
+      "Bash(/c/Program Files/GitHub CLI/gh.exe api repos*)"
     ]
   },
   "permissionMode": "default"
