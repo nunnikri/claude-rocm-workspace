@@ -15,17 +15,24 @@ Lessons from auto_review/poll_and_review.py:
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 from config import (
+    OUTPUT_HTML,
     REVIEWS_DIR,
     TASKS_DIR,
     anthropic_config,
     parse_custom_headers,
 )
 from github_client import Issue, PR
+
+
+def _rel(path: Path) -> str:
+    """Return path relative to dashboard.html location, with forward slashes."""
+    return os.path.relpath(path, OUTPUT_HTML.parent).replace("\\", "/")
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +139,7 @@ def review_pr(pr: PR, log_fn=print) -> bool:
     review_file = review_dir / f"pr_{repo_short}_{pr.number}.md"
     review_file.write_text(text, encoding="utf-8")
 
-    pr.review_file = str(review_file.relative_to(REVIEWS_DIR.parent))
+    pr.review_file = _rel(review_file)
     pr.review_status = "reviewed"
     log_fn(f"  Written: {review_file}")
     return True
@@ -182,7 +189,7 @@ def triage_issue(issue: Issue, log_fn=print) -> bool:
     triage_file = TASKS_DIR / f"{repo_short}-{issue.number}.md"
     triage_file.write_text(text, encoding="utf-8")
 
-    issue.triage_file = str(triage_file.relative_to(TASKS_DIR.parent.parent))
+    issue.triage_file = _rel(triage_file)
     issue.triage_status = "triaged"
     log_fn(f"  Written: {triage_file}")
     return True
