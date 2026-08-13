@@ -61,10 +61,11 @@ def _pr_row(pr: PR, kind: str) -> str:
         if pr.review_file else "—"
     )
     draft = ' <span class="badge badge-muted">draft</span>' if pr.draft else ""
+    repo_short = pr.repo.split("/")[-1]
     return (
         f"<tr>"
         f'<td><a href="{_e(pr.url)}" target="_blank">#{pr.number}</a></td>'
-        f"<td>{_e(pr.repo.split("/")[-1])}</td>"
+        f"<td>{_e(repo_short)}</td>"
         f'<td>{_e(pr.title)}{draft}</td>'
         f"<td>{badge_html}</td>"
         f"<td>{review_link}</td>"
@@ -80,10 +81,11 @@ def _issue_row(issue: Issue) -> str:
         if issue.triage_file else "—"
     )
     labels = " ".join(f'<span class="label">{_e(lb)}</span>' for lb in issue.labels[:3])
+    repo_short = issue.repo.split("/")[-1]
     return (
         f"<tr>"
         f'<td><a href="{_e(issue.url)}" target="_blank">#{issue.number}</a></td>'
-        f"<td>{_e(issue.repo.split("/")[-1])}</td>"
+        f"<td>{_e(repo_short)}</td>"
         f'<td>{_e(issue.title)} {labels}</td>'
         f"<td>{badge_html}</td>"
         f"<td>{triage_link}</td>"
@@ -94,10 +96,11 @@ def _issue_row(issue: Issue) -> str:
 def _task_row(task: Task) -> str:
     status_badge = _TASK_STATUS_BADGE.get(task.status, _TASK_STATUS_BADGE["open"])
     priority_badge = _PRIORITY_BADGE.get(task.priority, "")
+    repo_short = task.repo.split("/")[-1] if task.repo else "-"
     return (
         f"<tr>"
         f'<td><a href="{_e(task.url)}" target="_blank">{_e(task.name)}</a></td>'
-        f"<td>{_e(task.repo.split("/")[-1] if task.repo else "—")}</td>"
+        f"<td>{_e(repo_short)}</td>"
         f"<td>{_e(task.title)}</td>"
         f"<td>{priority_badge}</td>"
         f"<td>{status_badge}</td>"
