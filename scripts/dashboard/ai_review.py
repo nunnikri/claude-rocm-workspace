@@ -41,7 +41,10 @@ def _rel(path: Path) -> str:
 
 def _call_api(prompt: str, model: str, log_fn=print) -> str | None:
     """
-    POST to Anthropic Messages API. Returns response text or None on error.
+    POST to Anthropic Messages API using streaming (text/event-stream).
+
+    Streaming keeps the TCP connection alive by sending tokens as they are
+    generated, which prevents AMD proxy from closing idle connections at ~60s.
     Credentials sourced from config — never logged here.
     """
     acfg = anthropic_config()
@@ -55,7 +58,8 @@ def _call_api(prompt: str, model: str, log_fn=print) -> str | None:
 
     payload = json.dumps({
         "model": model,
-        "max_tokens": 3000,   # keep responses short to stay under AMD proxy ~90s timeout
+        "max_tokens": 3000,
+        "stream": True,   # streaming: tokens arrive incrementally, proxy stays alive
         "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
 
@@ -72,9 +76,24 @@ def _call_api(prompt: str, model: str, log_fn=print) -> str | None:
     )
 
     try:
+        chunks: list[str] = []
         with urllib.request.urlopen(req, timeout=300) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        return result["content"][0]["text"]
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") == "content_block_delta":
+                    delta = event.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        chunks.append(delta.get("text", ""))
+        return "".join(chunks) or None
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         log_fn(f"  ERROR: API HTTP {e.code}: {body[:300]}")
