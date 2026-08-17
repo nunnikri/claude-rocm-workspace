@@ -253,9 +253,9 @@ def fetch_assigned_issues(user: str, repos: list[str], log_fn=print) -> list[Iss
 
 
 def fetch_pr_diff(pr: PR, log_fn=print) -> None:
-    """Populate pr.diff in-place. Truncates at 20K chars to keep prompts short."""
+    """Populate pr.diff in-place. Truncates at 12K chars to stay under AMD proxy timeout."""
     diff = _gh_pr_diff(pr.repo, pr.number, log_fn=log_fn)
-    MAX = 20_000
+    MAX = 12_000
     if len(diff) > MAX:
         diff = diff[:MAX] + f"\n\n[... truncated at {MAX} chars ...]"
     pr.diff = diff

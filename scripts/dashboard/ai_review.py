@@ -55,7 +55,7 @@ def _call_api(prompt: str, model: str, log_fn=print) -> str | None:
 
     payload = json.dumps({
         "model": model,
-        "max_tokens": 8192,
+        "max_tokens": 3000,   # keep responses short to stay under AMD proxy ~90s timeout
         "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
 
@@ -91,10 +91,13 @@ def _call_api(prompt: str, model: str, log_fn=print) -> str | None:
 # PR review
 # ---------------------------------------------------------------------------
 
+_GUIDELINES_LIMIT = 2000   # keep prompt under AMD proxy timeout budget
+
+
 def _pr_review_prompt(pr: PR, guidelines: str) -> str:
     return (
         f"You are performing a code review for a ROCm build infrastructure PR.\n\n"
-        f"## Review guidelines\n\n{guidelines}\n\n"
+        f"## Review guidelines (excerpt)\n\n{guidelines[:_GUIDELINES_LIMIT]}\n\n"
         f"---\n\n"
         f"## PR details\n\n"
         f"URL: {pr.url}\n"
