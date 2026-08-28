@@ -5,8 +5,8 @@
 """
 Generate dashboard.html — single self-contained file with:
 - Summary bar: team-wide counts
-- Per-member tabs: PRs created, review requests, GitHub issues, Jira (placeholder), tasks
-- All links open review/triage files or GitHub URLs
+- Per-member tabs: PRs created, review requests, GitHub issues, Jira issues, tasks
+- All links open review/triage files or GitHub/Jira URLs
 - No external CDN dependencies — CSS and JS are inline
 """
 
@@ -93,6 +93,41 @@ def _issue_row(issue: Issue) -> str:
     )
 
 
+def _jira_row(issue: JiraIssue) -> str:
+    """Render a single Jira issue table row."""
+    badge_html, _ = _STATUS_BADGE.get(issue.triage_status, _STATUS_BADGE[""])
+    triage_link = (
+        f'<a href="{_e(issue.triage_file)}" target="_blank">view triage</a>'
+        if issue.triage_file else "—"
+    )
+    priority_short = issue.priority.split(":")[0].strip() if issue.priority else ""
+    priority_badge = _PRIORITY_BADGE.get(priority_short, f'<span class="badge badge-muted">{_e(issue.priority)}</span>' if issue.priority else "")
+    labels = " ".join(f'<span class="label">{_e(lb)}</span>' for lb in issue.labels[:3])
+    return (
+        f"<tr>"
+        f'<td><a href="{_e(issue.url)}" target="_blank">{_e(issue.key)}</a></td>'
+        f"<td>{_e(issue.status)}</td>"
+        f"<td>{priority_badge}</td>"
+        f'<td>{_e(issue.summary)} {labels}</td>'
+        f"<td>{badge_html}</td>"
+        f"<td>{triage_link}</td>"
+        f"</tr>\n"
+    )
+
+
+def _jira_table(issues: list[JiraIssue], empty_msg: str) -> str:
+    if not issues:
+        return f'<p class="empty">{empty_msg}</p>'
+    rows = "".join(_jira_row(i) for i in issues)
+    return (
+        "<table>"
+        "<thead><tr><th>Key</th><th>Status</th><th>Priority</th><th>Summary</th>"
+        "<th>Triage</th><th>Link</th></tr></thead>"
+        f"<tbody>{rows}</tbody>"
+        "</table>"
+    )
+
+
 def _task_row(task: Task) -> str:
     status_badge = _TASK_STATUS_BADGE.get(task.status, _TASK_STATUS_BADGE["open"])
     priority_badge = _PRIORITY_BADGE.get(task.priority, "")
@@ -159,12 +194,6 @@ def _member_section(
     jira_issues: list[JiraIssue],
     tasks: list[Task],
 ) -> str:
-    jira_block = (
-        '<p class="empty">Jira integration coming soon.</p>'
-        if not jira_issues
-        else _issue_table([], "")   # placeholder until implemented
-    )
-
     return f"""
 <div class="member-section" id="member-{_e(user)}">
   <h2>@{_e(user)}</h2>
@@ -184,9 +213,9 @@ def _member_section(
     {_issue_table(issues, "No assigned issues.")}
   </div>
 
-  <div class="section-block jira-placeholder">
-    <h3>Jira Issues <span class="count badge-muted">N/A</span></h3>
-    {jira_block}
+  <div class="section-block">
+    <h3>Jira Issues <span class="count">{len(jira_issues)}</span></h3>
+    {_jira_table(jira_issues, "No assigned Jira issues.")}
   </div>
 
   <div class="section-block">
@@ -242,7 +271,6 @@ header .updated { font-size: 12px; color: var(--muted); margin-left: auto; }
   text-transform: uppercase; letter-spacing: .05em; margin-bottom: 10px; }
 .count { font-size: 12px; background: var(--border); border-radius: 10px;
   padding: 1px 7px; font-weight: normal; }
-.jira-placeholder { opacity: .6; }
 
 /* Tables */
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -294,6 +322,7 @@ def _summary_tab(
     total_created  = sum(len(v["prs_created"]) for v in member_data.values())
     total_requests = sum(len(v["review_requests"]) for v in member_data.values())
     total_issues   = sum(len(v["issues"]) for v in member_data.values())
+    total_jira     = sum(len(v.get("jira_issues", [])) for v in member_data.values())
     total_tasks    = len([t for t in all_tasks if t.status not in ("done",)])
 
     cards = f"""
@@ -311,6 +340,10 @@ def _summary_tab(
     <div class="label">GitHub issues</div>
   </div>
   <div class="summary-card">
+    <div class="num">{total_jira}</div>
+    <div class="label">Jira issues</div>
+  </div>
+  <div class="summary-card">
     <div class="num">{total_tasks}</div>
     <div class="label">Open tasks</div>
   </div>
@@ -324,19 +357,20 @@ def _summary_tab(
         c = len(d.get("prs_created", []))
         r = len(d.get("review_requests", []))
         i = len(d.get("issues", []))
+        j = len(d.get("jira_issues", []))
         t = len(d.get("tasks", []))
         rows += (
             f'<tr>'
             f'<td><a href="#" onclick="showTab(\'{_e(user)}\');return false;">'
             f'@{_e(user)}</a></td>'
-            f"<td>{c}</td><td>{r}</td><td>{i}</td><td>N/A</td><td>{t}</td>"
+            f"<td>{c}</td><td>{r}</td><td>{i}</td><td>{j}</td><td>{t}</td>"
             f"</tr>\n"
         )
 
     member_table = (
         "<table><thead><tr>"
         "<th>Member</th><th>PRs created</th><th>Review requests</th>"
-        "<th>GH issues</th><th>Jira</th><th>Tasks</th>"
+        "<th>GH issues</th><th>Jira issues</th><th>Tasks</th>"
         "</tr></thead>"
         f"<tbody>{rows}</tbody></table>"
     )

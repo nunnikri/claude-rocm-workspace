@@ -35,6 +35,15 @@ TEAM: list[str] = [
     "dileepr1",
 ]
 
+# GitHub username -> AMD email, used to query Jira (assignee is email-based there).
+TEAM_JIRA_EMAILS: dict[str, str] = {
+    "nunnikri": "nirmal.unnikrishnan@amd.com",
+    "arvindcheru": "Aravindan.Cheruvally@amd.com",
+    "raramakr": "Ranjith.Ramakrishnan@amd.com",
+    "dileepr1": "Dileep.Ravindranathan@amd.com",
+    "jonatluu": "Jonathan.Luu@amd.com",
+}
+
 # ---------------------------------------------------------------------------
 # Repositories to monitor
 # ---------------------------------------------------------------------------
@@ -77,8 +86,14 @@ _DOTENV: dict[str, str] = _load_dotenv()
 
 
 def cfg(key: str, default: str = "") -> str:
-    """Return config value: environment variable first, then .env file."""
-    return os.environ.get(key) or _DOTENV.get(key, default)
+    """Return config value: scripts/dashboard/.env first, then environment variable.
+
+    .env takes precedence deliberately: this script must be self-contained and
+    not silently inherit ambient vars from whatever shell/IDE launched it (e.g.
+    a Claude Code session's own ANTHROPIC_MODEL, ANTHROPIC_API_KEY, etc., which
+    are unrelated to this script's own AMD proxy configuration).
+    """
+    return _DOTENV.get(key) or os.environ.get(key, default)
 
 
 # ---------------------------------------------------------------------------

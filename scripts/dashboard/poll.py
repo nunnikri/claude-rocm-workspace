@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
 from datetime import datetime, timezone
 
 # All imports relative to scripts/dashboard/ — works when run as:
@@ -30,7 +31,7 @@ import html_gen
 import jira_client
 import state as st
 import tasks as task_lib
-from config import REPOS, TEAM
+from config import REPOS, TEAM, TEAM_JIRA_EMAILS
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +40,12 @@ from config import REPOS, TEAM
 
 def _log(msg: str) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+    line = f"[{ts}] {msg}"
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        print(line.encode(sys.stdout.encoding or "ascii", errors="replace")
+                  .decode(sys.stdout.encoding or "ascii"), flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -73,8 +79,15 @@ def _collect_member(
     issues = gh.fetch_assigned_issues(user, REPOS, log_fn=log_fn)
     log_fn(f"  Found {len(issues)} assigned issues")
 
-    # 4. Jira (stub)
-    jira_issues = jira_client.fetch_assigned_jira_issues(user, log_fn=log_fn)
+    # 4. Jira issues assigned (email-based lookup)
+    jira_issues: list = []
+    jira_email = TEAM_JIRA_EMAILS.get(user)
+    if jira_email:
+        log_fn(f"  Fetching Jira issues for {jira_email}...")
+        jira_issues = jira_client.fetch_assigned_jira_issues(jira_email, log_fn=log_fn)
+        log_fn(f"  Found {len(jira_issues)} Jira issues")
+    else:
+        log_fn(f"  No Jira email mapping for {user} — skipping Jira fetch")
 
     if not run_ai:
         # Restore previous review/triage status from state
@@ -82,6 +95,8 @@ def _collect_member(
             st.restore_pr_review(pr, current_state)
         for issue in issues:
             st.restore_issue_triage(issue, current_state)
+        for jira_issue in jira_issues:
+            st.restore_jira_issue_triage(jira_issue, current_state)
         return dict(
             prs_created=prs_created,
             review_requests=review_requests,
@@ -102,7 +117,7 @@ def _collect_member(
             log_fn(f"  NO CHANGE: {pr.repo}#{pr.number}")
             st.restore_pr_review(pr, current_state)
 
-    # 6. AI triage for issues
+    # 6. AI triage for GitHub issues
     for issue in issues:
         if st.issue_needs_triage(issue, current_state):
             log_fn(f"  NEW/UPDATED issue: {issue.repo}#{issue.number} — {issue.title}")
@@ -112,6 +127,16 @@ def _collect_member(
         else:
             log_fn(f"  NO CHANGE: {issue.repo}#{issue.number}")
             st.restore_issue_triage(issue, current_state)
+
+    # 7. AI triage for Jira issues
+    for jira_issue in jira_issues:
+        if st.jira_issue_needs_triage(jira_issue, current_state):
+            log_fn(f"  NEW/UPDATED Jira: {jira_issue.key} — {jira_issue.summary}")
+            ai_review.triage_jira_issue(jira_issue, log_fn=log_fn)
+            st.mark_jira_issue_triaged(jira_issue, current_state)
+        else:
+            log_fn(f"  NO CHANGE: {jira_issue.key}")
+            st.restore_jira_issue_triage(jira_issue, current_state)
 
     return dict(
         prs_created=prs_created,
@@ -148,8 +173,8 @@ def main() -> int:
                     run_ai=not args.no_ai,
                 )
                 member_data[user] = data
-            except Exception as e:
-                _log(f"ERROR collecting data for {user}: {e}")
+            except Exception:
+                _log(f"ERROR collecting data for {user}:\n{traceback.format_exc()}")
                 member_data[user] = dict(
                     prs_created=[], review_requests=[],
                     issues=[], jira_issues=[],

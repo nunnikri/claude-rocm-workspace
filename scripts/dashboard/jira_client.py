@@ -3,39 +3,237 @@
 # SPDX-License-Identifier: MIT
 
 """
-Jira client — stub placeholder.
+Jira client using the Atlassian REST API v3 (direct REST, no MCP).
 
-TODO: Implement when Jira credentials and API access are available.
-Expected output: list of JiraIssue objects per user.
+Auth is Basic <email>:<api_token> against the real Jira REST API — confirmed
+working directly (not routed through the AMD MCP gateway, which is only
+reachable from inside a Claude Code session).
 
-Possible implementation paths:
-- Jira REST API v3 (cloud): https://developer.atlassian.com/cloud/jira/platform/rest/v3/
-- Jira Python SDK: jira package (pip install jira)
-- JIRA_BASE_URL, JIRA_TOKEN in .env
+Reads credentials from scripts/dashboard/.env:
+  JIRA_BASE_URL        - e.g. https://amd-hub.atlassian.net
+  AMD_NTID             - AMD email address (e.g. nirmal.unnikrishnan@amd.com)
+  ATLASSIAN_MCP_AUTH   - Atlassian API token from
+                         id.atlassian.com/manage-profile/security/api-tokens
 
-For now, all functions return empty lists so the dashboard renders
-with a "Jira: N/A" placeholder block.
+Credentials are never logged.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import base64
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
 
+from config import cfg
+
+
+# ---------------------------------------------------------------------------
+# Data class
+# ---------------------------------------------------------------------------
 
 @dataclass
 class JiraIssue:
     url: str
-    key: str        # e.g. SWDEV-12345
+    key: str        # e.g. ROCM-26072
     summary: str
     status: str     # e.g. "In Progress"
     priority: str   # e.g. "P1"
-    assignee: str
+    assignee: str   # display name
+    labels: list[str] = field(default_factory=list)
+    issue_type: str = ""
+    description: str = ""    # plain text, populated by fetch_issue_description()
+    updated: str = ""        # ISO timestamp, used for state/change tracking
+    triage_file: str = ""    # set by ai_review after triage
+    triage_status: str = ""  # "triaged" | "failed" | "pending"
 
 
-def fetch_assigned_jira_issues(user: str, log_fn=print) -> list[JiraIssue]:
+# ---------------------------------------------------------------------------
+# Auth helper
+# ---------------------------------------------------------------------------
+
+def _auth_header() -> str:
+    """Build Basic Auth header value from AMD_NTID (email) + ATLASSIAN_MCP_AUTH
+    (API token). Never log the return value."""
+    email = cfg("AMD_NTID")
+    token = cfg("ATLASSIAN_MCP_AUTH")
+    if not email or not token:
+        raise RuntimeError(
+            "AMD_NTID and ATLASSIAN_MCP_AUTH must be set in scripts/dashboard/.env"
+        )
+    credentials = base64.b64encode(f"{email}:{token}".encode()).decode()
+    return f"Basic {credentials}"
+
+
+_DEBUG = False
+
+
+def _jira_get(path: str, log_fn=print) -> dict | None:
+    """GET request to Jira REST API. Returns parsed JSON or None on error."""
+    base_url = cfg("JIRA_BASE_URL", "https://amd-hub.atlassian.net").rstrip("/")
+
+    url = f"{base_url}/rest/api/3{path}"
+    if _DEBUG:
+        log_fn(f"  [debug] GET {url}")
+        log_fn(f"  [debug] AMD_NTID={'(set)' if cfg('AMD_NTID') else '(not set)'}")
+        log_fn(f"  [debug] ATLASSIAN_MCP_AUTH={'(set)' if cfg('ATLASSIAN_MCP_AUTH') else '(not set)'}")
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": _auth_header(),
+                "Accept": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        limit = len(body) if _DEBUG else 200
+        log_fn(f"  ERROR: Jira API HTTP {e.code} for {path}: {body[:limit]}")
+        return None
+    except urllib.error.URLError as e:
+        log_fn(f"  ERROR: Jira API request failed: {e.reason}")
+        return None
+    except RuntimeError as e:
+        log_fn(f"  ERROR: {e}")
+        return None
+    except Exception as e:
+        log_fn(f"  ERROR: Jira unexpected error: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Plain-text extraction from Atlassian Document Format (ADF)
+# ---------------------------------------------------------------------------
+
+def _adf_to_text(node: dict | list | str | None) -> str:
+    """Extract plain text from an ADF description node (Jira Cloud v3 format)."""
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, list):
+        return "".join(_adf_to_text(n) for n in node)
+    if isinstance(node, dict):
+        if node.get("type") == "text":
+            return node.get("text", "")
+        parts = [_adf_to_text(child) for child in node.get("content", [])]
+        text = "".join(parts)
+        if node.get("type") == "paragraph":
+            return text + "\n"
+        return text
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Issue fetching
+# ---------------------------------------------------------------------------
+
+_ISSUE_FIELDS = "summary,status,priority,assignee,labels,issuetype,description,updated"
+
+
+def _parse_issue(data: dict) -> JiraIssue:
+    fields = data.get("fields", {})
+    base_url = cfg("JIRA_BASE_URL", "https://amd-hub.atlassian.net").rstrip("/")
+    key = data.get("key", "")
+    assignee = (fields.get("assignee") or {}).get("displayName", "Unassigned")
+    priority = (fields.get("priority") or {}).get("name", "")
+    status = (fields.get("status") or {}).get("name", "")
+    issue_type = (fields.get("issuetype") or {}).get("name", "")
+    labels = fields.get("labels") or []
+    description = _adf_to_text(fields.get("description")).strip()
+    updated = fields.get("updated", "")
+    return JiraIssue(
+        url=f"{base_url}/browse/{key}",
+        key=key,
+        summary=fields.get("summary", ""),
+        status=status,
+        priority=priority,
+        assignee=assignee,
+        labels=labels,
+        issue_type=issue_type,
+        description=description,
+        updated=updated,
+    )
+
+
+def get_issue(key: str, log_fn=print) -> JiraIssue | None:
+    """Fetch a single Jira issue by key (e.g. 'ROCM-26072')."""
+    data = _jira_get(f"/issue/{key}?fields={_ISSUE_FIELDS}", log_fn=log_fn)
+    return _parse_issue(data) if data else None
+
+
+_SEARCH_PAGE_SIZE = 100   # per-page size; pagination below fetches ALL matches
+
+
+def fetch_assigned_jira_issues(email: str, log_fn=print) -> list[JiraIssue]:
     """
-    Returns Jira issues assigned to `user`.
-    Currently a stub — returns empty list.
+    Fetch ALL open Jira issues assigned to `email` (AMD email address), across
+    all projects visible to the authenticated account, excluding Done-category
+    issues. Paginates via nextPageToken until every match is retrieved — no
+    client-imposed cap on total result count.
+
+    Uses /rest/api/3/search/jql — the old /search endpoint was removed
+    (see https://developer.atlassian.com/changelog/#CHANGE-2046).
     """
-    # TODO: implement Jira REST API call
-    return []
+    jql = f'assignee = "{email}" AND statusCategory != Done ORDER BY updated DESC'
+    jql_encoded = urllib.parse.quote(jql)
+
+    issues: list[JiraIssue] = []
+    next_page_token: str | None = None
+
+    while True:
+        path = (
+            f"/search/jql?jql={jql_encoded}&maxResults={_SEARCH_PAGE_SIZE}"
+            f"&fields={_ISSUE_FIELDS}"
+        )
+        if next_page_token:
+            path += f"&nextPageToken={urllib.parse.quote(next_page_token)}"
+
+        data = _jira_get(path, log_fn=log_fn)
+        if not data or "issues" not in data:
+            break
+
+        issues.extend(_parse_issue(issue) for issue in data["issues"])
+
+        next_page_token = data.get("nextPageToken")
+        if not next_page_token or data.get("isLast", True):
+            break
+
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Quick test
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import re
+    import sys
+    _DEBUG = "--debug" in sys.argv
+    if _DEBUG:
+        import jira_client as _self
+        _self._DEBUG = True
+        sys.argv.remove("--debug")
+    arg = sys.argv[1] if len(sys.argv) > 1 else "ROCM-26072"
+    # Accept either a full URL or a bare key
+    m = re.search(r"([A-Z][A-Z0-9_]+-\d+)", arg)
+    key = m.group(1) if m else arg
+    print(f"Fetching {key}...")
+    issue = get_issue(key)
+    if issue:
+        print(f"  Key:      {issue.key}")
+        print(f"  Summary:  {issue.summary}")
+        print(f"  Status:   {issue.status}")
+        print(f"  Priority: {issue.priority}")
+        print(f"  Assignee: {issue.assignee}")
+        print(f"  Type:     {issue.issue_type}")
+        print(f"  URL:      {issue.url}")
+        print(f"  Description: {issue.description[:200]}")
+    else:
+        print("  Failed to fetch issue")
+        sys.exit(1)

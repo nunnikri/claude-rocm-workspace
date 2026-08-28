@@ -19,6 +19,7 @@ from pathlib import Path
 
 from config import STATE_FILE
 from github_client import Issue, PR
+from jira_client import JiraIssue
 
 
 # ---------------------------------------------------------------------------
@@ -96,5 +97,36 @@ def mark_issue_triaged(issue: Issue, state: dict) -> None:
 def restore_issue_triage(issue: Issue, state: dict) -> None:
     """Populate issue.triage_file and issue.triage_status from previous state."""
     entry = state["issues"].get(issue.url, {})
+    issue.triage_file = entry.get("triage_file", "")
+    issue.triage_status = entry.get("triage_status", "pending")
+
+
+# ---------------------------------------------------------------------------
+# Jira issue state helpers
+# ---------------------------------------------------------------------------
+
+def jira_issue_needs_triage(issue: JiraIssue, state: dict) -> bool:
+    """True if the Jira issue is new or has been updated since last triage."""
+    entry = state.setdefault("jira_issues", {}).get(issue.url, {})
+    return entry.get("updated") != issue.updated
+
+
+def mark_jira_issue_triaged(issue: JiraIssue, state: dict) -> None:
+    state.setdefault("jira_issues", {})[issue.url] = {
+        "url": issue.url,
+        "key": issue.key,
+        "summary": issue.summary,
+        "status": issue.status,
+        "priority": issue.priority,
+        "updated": issue.updated,
+        "triage_file": issue.triage_file,
+        "triage_status": issue.triage_status,
+        "triaged_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def restore_jira_issue_triage(issue: JiraIssue, state: dict) -> None:
+    """Populate issue.triage_file and issue.triage_status from previous state."""
+    entry = state.setdefault("jira_issues", {}).get(issue.url, {})
     issue.triage_file = entry.get("triage_file", "")
     issue.triage_status = entry.get("triage_status", "pending")

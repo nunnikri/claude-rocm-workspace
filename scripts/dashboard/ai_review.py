@@ -28,6 +28,7 @@ from config import (
     parse_custom_headers,
 )
 from github_client import Issue, PR
+from jira_client import JiraIssue
 
 
 def _rel(path: Path) -> str:
@@ -209,6 +210,58 @@ def triage_issue(issue: Issue, log_fn=print) -> bool:
     TASKS_DIR.mkdir(parents=True, exist_ok=True)
     repo_short = issue.repo.split("/")[-1]
     triage_file = TASKS_DIR / f"{repo_short}-{issue.number}.md"
+    triage_file.write_text(text, encoding="utf-8")
+
+    issue.triage_file = _rel(triage_file)
+    issue.triage_status = "triaged"
+    log_fn(f"  Written: {triage_file}")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Jira issue triage
+# ---------------------------------------------------------------------------
+
+def _jira_triage_prompt(issue: JiraIssue) -> str:
+    labels = ", ".join(issue.labels) or "none"
+    return (
+        f"Triage this Jira ticket for a ROCm build infrastructure project.\n\n"
+        f"Key: {issue.key}\n"
+        f"Summary: {issue.summary}\n"
+        f"Type: {issue.issue_type}\n"
+        f"Status: {issue.status}\n"
+        f"Priority: {issue.priority}\n"
+        f"Labels: {labels}\n"
+        f"URL: {issue.url}\n\n"
+        f"## Description\n\n{issue.description or '(no description)'}\n\n"
+        f"---\n\n"
+        f"Write a concise triage summary in markdown:\n"
+        f"1. **Problem** (2-3 sentences)\n"
+        f"2. **Root cause hypothesis**\n"
+        f"3. **Affected components**\n"
+        f"4. **Priority assessment** (agree/disagree with current priority, with justification)\n"
+        f"5. **Suggested next steps** (bullet list)\n"
+    )
+
+
+def triage_jira_issue(issue: JiraIssue, log_fn=print) -> bool:
+    """
+    Generate AI triage summary for a Jira ticket and write to
+    tasks/active/JIRA-<key>.md. Sets issue.triage_file and issue.triage_status.
+    """
+    acfg = anthropic_config()
+    model = acfg["model_triage"]
+
+    prompt = _jira_triage_prompt(issue)
+    log_fn(f"  Triaging Jira {issue.key} (model: {model})")
+
+    text = _call_api(prompt, model, log_fn=log_fn)
+    if text is None:
+        issue.triage_status = "failed"
+        return False
+
+    TASKS_DIR.mkdir(parents=True, exist_ok=True)
+    triage_file = TASKS_DIR / f"JIRA-{issue.key}.md"
     triage_file.write_text(text, encoding="utf-8")
 
     issue.triage_file = _rel(triage_file)
