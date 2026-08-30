@@ -47,6 +47,8 @@ class JiraIssue:
     issue_type: str = ""
     description: str = ""    # plain text, populated by fetch_issue_description()
     updated: str = ""        # ISO timestamp, used for state/change tracking
+    comments: str = ""              # formatted, populated by fetch_issue_context()
+    attachments_text: str = ""      # formatted, populated by fetch_issue_context()
     triage_file: str = ""    # set by ai_review after triage
     triage_status: str = ""  # "triaged" | "failed" | "pending"
 
@@ -165,6 +167,94 @@ def get_issue(key: str, log_fn=print) -> JiraIssue | None:
     """Fetch a single Jira issue by key (e.g. 'ROCM-26072')."""
     data = _jira_get(f"/issue/{key}?fields={_ISSUE_FIELDS}", log_fn=log_fn)
     return _parse_issue(data) if data else None
+
+
+# ---------------------------------------------------------------------------
+# Context enrichment (comments + log attachments) — for triage only, not the
+# lightweight bulk list fetch used for the dashboard table.
+# ---------------------------------------------------------------------------
+
+_COMMENTS_LIMIT = 4000            # combined char budget for comment history
+_ATTACHMENT_EXTENSIONS = (".log", ".txt", ".out", ".yaml", ".yml", ".json", ".cfg", ".conf")
+_ATTACHMENT_MAX_BYTES = 200_000    # skip anything bigger — not a text log
+_ATTACHMENT_PER_FILE_LIMIT = 3000  # char budget per attachment
+_ATTACHMENT_TOTAL_LIMIT = 8000     # combined char budget across all attachments
+
+
+def _fetch_comments_text(key: str, log_fn=print) -> str:
+    """Fetch recent comments, newest first, formatted and length-capped."""
+    data = _jira_get(f"/issue/{key}/comment?orderBy=-created&maxResults=20", log_fn=log_fn)
+    if not data or not data.get("comments"):
+        return ""
+
+    parts = []
+    for c in data["comments"]:
+        author = (c.get("author") or {}).get("displayName", "Unknown")
+        created = c.get("created", "")
+        text = _adf_to_text(c.get("body")).strip()
+        if text:
+            parts.append(f"**{author} ({created}):**\n{text}")
+
+    combined = "\n\n".join(parts)
+    if len(combined) > _COMMENTS_LIMIT:
+        combined = combined[:_COMMENTS_LIMIT] + "\n\n[... earlier comments omitted ...]"
+    return combined
+
+
+def _download_attachment_text(url: str, log_fn=print) -> str:
+    """GET raw attachment content and decode as text. Returns '' on any failure."""
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"Authorization": _auth_header(), "Accept": "*/*"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except Exception as e:
+        log_fn(f"  WARNING: could not download attachment [{url}]: {e}")
+        return ""
+
+
+def _fetch_attachments_text(key: str, log_fn=print) -> str:
+    """Fetch log-like attachments (by extension + size), formatted and length-capped."""
+    data = _jira_get(f"/issue/{key}?fields=attachment", log_fn=log_fn)
+    if not data:
+        return ""
+    attachments = (data.get("fields") or {}).get("attachment") or []
+
+    parts = []
+    total_len = 0
+    for att in attachments:
+        filename = att.get("filename", "")
+        if not filename.lower().endswith(_ATTACHMENT_EXTENSIONS):
+            continue
+        if att.get("size", 0) > _ATTACHMENT_MAX_BYTES:
+            continue
+        content_url = att.get("content")
+        if not content_url:
+            continue
+        text = _download_attachment_text(content_url, log_fn=log_fn)
+        if not text:
+            continue
+        if len(text) > _ATTACHMENT_PER_FILE_LIMIT:
+            text = text[:_ATTACHMENT_PER_FILE_LIMIT] + f"\n[... truncated at {_ATTACHMENT_PER_FILE_LIMIT} chars ...]"
+        if total_len + len(text) > _ATTACHMENT_TOTAL_LIMIT:
+            parts.append(f"**{filename}:** [... omitted, attachment budget reached ...]")
+            continue
+        parts.append(f"**{filename}:**\n```\n{text}\n```")
+        total_len += len(text)
+
+    return "\n\n".join(parts)
+
+
+def fetch_issue_context(issue: JiraIssue, log_fn=print) -> None:
+    """
+    Populate issue.comments and issue.attachments_text in-place. Best-effort:
+    any failure leaves the corresponding field empty/partial rather than
+    raising, since a broken comment/attachment fetch shouldn't abort triage.
+    """
+    issue.comments = _fetch_comments_text(issue.key, log_fn=log_fn)
+    issue.attachments_text = _fetch_attachments_text(issue.key, log_fn=log_fn)
 
 
 _SEARCH_PAGE_SIZE = 100   # per-page size; pagination below fetches ALL matches

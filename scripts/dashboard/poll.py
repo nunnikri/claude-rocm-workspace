@@ -128,12 +128,20 @@ def _collect_member(
             log_fn(f"  NO CHANGE: {issue.repo}#{issue.number}")
             st.restore_issue_triage(issue, current_state)
 
-    # 7. AI triage for Jira issues
+    # 7. AI triage for Jira issues (two-tier gating — see state.py docstrings:
+    #    cheap tier on `updated`, then a content-hash tier so metadata-only
+    #    touches like a label/sprint change don't trigger a wasted AI call)
     for jira_issue in jira_issues:
         if st.jira_issue_needs_triage(jira_issue, current_state):
-            log_fn(f"  NEW/UPDATED Jira: {jira_issue.key} — {jira_issue.summary}")
-            ai_review.triage_jira_issue(jira_issue, log_fn=log_fn)
-            st.mark_jira_issue_triaged(jira_issue, current_state)
+            jira_client.fetch_issue_context(jira_issue, log_fn=log_fn)
+            if st.jira_issue_content_unchanged(jira_issue, current_state):
+                log_fn(f"  Metadata-only change: {jira_issue.key} (skipping re-triage)")
+                st.restore_jira_issue_triage(jira_issue, current_state)
+                st.mark_jira_issue_seen(jira_issue, current_state)
+            else:
+                log_fn(f"  NEW/UPDATED Jira: {jira_issue.key} — {jira_issue.summary}")
+                ai_review.triage_jira_issue(jira_issue, log_fn=log_fn)
+                st.mark_jira_issue_triaged(jira_issue, current_state)
         else:
             log_fn(f"  NO CHANGE: {jira_issue.key}")
             st.restore_jira_issue_triage(jira_issue, current_state)

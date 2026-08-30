@@ -13,6 +13,7 @@ re-processed. If it hasn't changed, the previous review/triage is reused.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -106,9 +107,35 @@ def restore_issue_triage(issue: Issue, state: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def jira_issue_needs_triage(issue: JiraIssue, state: dict) -> bool:
-    """True if the Jira issue is new or has been updated since last triage."""
+    """
+    Cheap tier: True if the Jira issue is new or `updated` has moved at all
+    since last seen. `updated` bumps on ANY field change (labels, sprint,
+    assignee, ...), not just content that matters for triage — see
+    jira_issue_content_unchanged() for the second, content-aware tier.
+    """
     entry = state.setdefault("jira_issues", {}).get(issue.url, {})
     return entry.get("updated") != issue.updated
+
+
+def _jira_content_hash(issue: JiraIssue) -> str:
+    """Fingerprint of the analysis-relevant content (not metadata)."""
+    blob = f"{issue.description}\n{issue.comments}\n{issue.attachments_text}"
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def jira_issue_content_unchanged(issue: JiraIssue, state: dict) -> bool:
+    """
+    Content tier: True if description/comments/attachments are identical to
+    the last actual triage, meaning whatever bumped `updated` was unrelated
+    metadata (label, sprint, assignee, ...) — safe to skip the AI call.
+    Requires issue.comments/attachments_text to already be populated (call
+    jira_client.fetch_issue_context() first).
+    """
+    entry = state.setdefault("jira_issues", {}).get(issue.url, {})
+    stored_hash = entry.get("content_hash")
+    if not stored_hash:
+        return False  # never triaged before — nothing to compare against
+    return stored_hash == _jira_content_hash(issue)
 
 
 def mark_jira_issue_triaged(issue: JiraIssue, state: dict) -> None:
@@ -119,10 +146,22 @@ def mark_jira_issue_triaged(issue: JiraIssue, state: dict) -> None:
         "status": issue.status,
         "priority": issue.priority,
         "updated": issue.updated,
+        "content_hash": _jira_content_hash(issue),
         "triage_file": issue.triage_file,
         "triage_status": issue.triage_status,
         "triaged_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def mark_jira_issue_seen(issue: JiraIssue, state: dict) -> None:
+    """
+    Metadata-only touch: update the stored `updated` timestamp so the cheap
+    tier doesn't re-flag this issue next run, but leave triage_file/status/
+    content_hash from the last real triage untouched.
+    """
+    entry = state.setdefault("jira_issues", {}).get(issue.url, {})
+    entry["updated"] = issue.updated
+    state["jira_issues"][issue.url] = entry
 
 
 def restore_jira_issue_triage(issue: JiraIssue, state: dict) -> None:
