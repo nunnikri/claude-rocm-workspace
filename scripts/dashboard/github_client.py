@@ -19,6 +19,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -46,31 +47,44 @@ def _gh_exe() -> str:
 # Raw API call
 # ---------------------------------------------------------------------------
 
+_RATE_LIMIT_RETRIES = 2
+_RATE_LIMIT_BACKOFF_SECONDS = 65  # search API quota resets on a 60s rolling window
+
+
 def _gh_api(endpoint: str, log_fn=print) -> Any:
     """
     GET request to GitHub API via gh CLI.
     endpoint: e.g. 'repos/ROCm/TheRock/pulls?state=open&per_page=100'
     Returns parsed JSON or None on error.
+    Retries on "API rate limit exceeded" (the Search API's separate, much
+    stricter 30 req/min cap) instead of silently dropping that page of results.
     """
     cmd = [_gh_exe(), "api", endpoint]
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            encoding="utf-8",
-            errors="replace",
-            check=True,
-        )
-        stdout = result.stdout or ""
-        return json.loads(stdout) if stdout.strip() else None
-    except subprocess.CalledProcessError as e:
-        log_fn(f"  gh api error [{endpoint}]: {(e.stderr or '').strip()[:200]}")
-        return None
-    except json.JSONDecodeError:
-        return None
-    except Exception as e:
-        log_fn(f"  gh unexpected error [{endpoint}]: {e}")
-        return None
+    for attempt in range(_RATE_LIMIT_RETRIES + 1):
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+            )
+            stdout = result.stdout or ""
+            return json.loads(stdout) if stdout.strip() else None
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "").strip()
+            if "rate limit exceeded" in stderr.lower() and attempt < _RATE_LIMIT_RETRIES:
+                log_fn(f"  gh api rate limited [{endpoint}], retrying in {_RATE_LIMIT_BACKOFF_SECONDS}s...")
+                time.sleep(_RATE_LIMIT_BACKOFF_SECONDS)
+                continue
+            log_fn(f"  gh api error [{endpoint}]: {stderr[:200]}")
+            return None
+        except json.JSONDecodeError:
+            return None
+        except Exception as e:
+            log_fn(f"  gh unexpected error [{endpoint}]: {e}")
+            return None
+    return None
 
 
 def _gh_pr_diff(repo: str, pr_number: int, log_fn=print) -> str:
@@ -182,6 +196,37 @@ def _pr_from_search_item(item: dict, repo: str) -> PR:
     )
 
 
+def _repo_from_item(item: dict) -> str:
+    """Extract 'owner/name' from a search item's repository_url."""
+    return "/".join(item.get("repository_url", "").split("/")[-2:])
+
+
+def _orgs_of(repos: list[str]) -> list[str]:
+    """Distinct org/owner prefixes across `repos`, in first-seen order."""
+    seen: list[str] = []
+    for repo in repos:
+        org = repo.split("/")[0]
+        if org not in seen:
+            seen.append(org)
+    return seen
+
+
+def _search_prs_across_repos(query_fragment: str, repos: list[str], log_fn=print) -> list[dict]:
+    """
+    Search PRs matching `query_fragment` scoped to org:<org> (one Search API
+    call per distinct org, not per repo — the Search API's 30 req/min cap is
+    easily exceeded once repeated per-repo across a full team), then filter
+    results down to exactly `repos` client-side (an org can contain repos we
+    don't track).
+    """
+    items: list[dict] = []
+    for org in _orgs_of(repos):
+        for item in _search_prs(f"{query_fragment}+org:{org}", log_fn=log_fn):
+            if _repo_from_item(item) in repos:
+                items.append(item)
+    return items
+
+
 def fetch_pr_details(pr: PR, log_fn=print) -> None:
     """Populate head_ref and base_ref in-place (needed for AI review prompt)."""
     if pr.head_ref:
@@ -199,13 +244,11 @@ def fetch_prs_created_by(user: str, repos: list[str], log_fn=print) -> list[PR]:
     Uses Search API so results are not capped at 100 total open PRs per repo.
     """
     results: list[PR] = []
-    for repo in repos:
-        repo_q = repo.replace("/", "%2F")
-        items = _search_prs(f"author:{user}+repo:{repo_q}", log_fn=log_fn)
-        for item in items:
-            if item.get("draft", False):
-                continue
-            results.append(_pr_from_search_item(item, repo))
+    items = _search_prs_across_repos(f"author:{user}", repos, log_fn=log_fn)
+    for item in items:
+        if item.get("draft", False):
+            continue
+        results.append(_pr_from_search_item(item, _repo_from_item(item)))
     return results
 
 
@@ -215,11 +258,9 @@ def fetch_review_requests(user: str, repos: list[str], log_fn=print) -> list[PR]
     Uses Search API so results are not capped at 100 total open PRs per repo.
     """
     results: list[PR] = []
-    for repo in repos:
-        repo_q = repo.replace("/", "%2F")
-        items = _search_prs(f"review-requested:{user}+repo:{repo_q}", log_fn=log_fn)
-        for item in items:
-            results.append(_pr_from_search_item(item, repo))
+    items = _search_prs_across_repos(f"review-requested:{user}", repos, log_fn=log_fn)
+    for item in items:
+        results.append(_pr_from_search_item(item, _repo_from_item(item)))
     return results
 
 
