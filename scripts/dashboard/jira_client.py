@@ -136,6 +136,7 @@ def _adf_to_text(node: dict | list | str | None) -> str:
 # ---------------------------------------------------------------------------
 
 _ISSUE_FIELDS = "summary,status,priority,assignee,labels,issuetype,description,updated"
+_DESCRIPTION_LIMIT = 3000  # some descriptions embed full log dumps — cap for prompt size
 
 
 def _parse_issue(data: dict) -> JiraIssue:
@@ -148,6 +149,8 @@ def _parse_issue(data: dict) -> JiraIssue:
     issue_type = (fields.get("issuetype") or {}).get("name", "")
     labels = fields.get("labels") or []
     description = _adf_to_text(fields.get("description")).strip()
+    if len(description) > _DESCRIPTION_LIMIT:
+        description = description[:_DESCRIPTION_LIMIT] + f"\n[... truncated at {_DESCRIPTION_LIMIT} chars ...]"
     updated = fields.get("updated", "")
     return JiraIssue(
         url=f"{base_url}/browse/{key}",
@@ -174,11 +177,15 @@ def get_issue(key: str, log_fn=print) -> JiraIssue | None:
 # lightweight bulk list fetch used for the dashboard table.
 # ---------------------------------------------------------------------------
 
-_COMMENTS_LIMIT = 4000            # combined char budget for comment history
+_COMMENTS_LIMIT = 3000             # combined char budget for comment history
 _ATTACHMENT_EXTENSIONS = (".log", ".txt", ".out", ".yaml", ".yml", ".json", ".cfg", ".conf")
 _ATTACHMENT_MAX_BYTES = 200_000    # skip anything bigger — not a text log
-_ATTACHMENT_PER_FILE_LIMIT = 3000  # char budget per attachment
-_ATTACHMENT_TOTAL_LIMIT = 8000     # combined char budget across all attachments
+_ATTACHMENT_PER_FILE_LIMIT = 2000  # char budget per attachment
+_ATTACHMENT_TOTAL_LIMIT = 5000     # combined char budget across all attachments
+# Total prompt content budget: ~3000 (description) + 3000 (comments) + 5000
+# (attachments) = ~11K chars, well down from the uncapped-description +
+# 4000 + 8000 that preceded it — the AMD gateway has timed out (504) waiting
+# for the first token on the larger prompts.
 
 
 def _fetch_comments_text(key: str, log_fn=print) -> str:

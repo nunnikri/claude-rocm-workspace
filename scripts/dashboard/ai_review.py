@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -40,12 +41,20 @@ def _rel(path: Path) -> str:
 # Core API call
 # ---------------------------------------------------------------------------
 
+_GATEWAY_TIMEOUT_RETRIES = 2
+_GATEWAY_TIMEOUT_BACKOFF_SECONDS = 10
+_RETRYABLE_HTTP_CODES = {502, 503, 504}
+
+
 def _call_api(prompt: str, model: str, log_fn=print) -> str | None:
     """
     POST to Anthropic Messages API using streaming (text/event-stream).
 
     Streaming keeps the TCP connection alive by sending tokens as they are
     generated, which prevents AMD proxy from closing idle connections at ~60s.
+    That doesn't cover a *gateway* timeout waiting for the first token on a
+    large prompt (502/503/504 before any streaming starts) — retried here
+    instead of dropping that triage/review outright.
     Credentials sourced from config — never logged here.
     """
     acfg = anthropic_config()
@@ -76,35 +85,41 @@ def _call_api(prompt: str, model: str, log_fn=print) -> str | None:
         method="POST",
     )
 
-    try:
-        chunks: list[str] = []
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            for raw_line in resp:
-                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-                if not line.startswith("data:"):
-                    continue
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    break
-                try:
-                    event = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-                if event.get("type") == "content_block_delta":
-                    delta = event.get("delta", {})
-                    if delta.get("type") == "text_delta":
-                        chunks.append(delta.get("text", ""))
-        return "".join(chunks) or None
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        log_fn(f"  ERROR: API HTTP {e.code}: {body[:300]}")
-        return None
-    except urllib.error.URLError as e:
-        log_fn(f"  ERROR: API request failed: {e.reason}")
-        return None
-    except Exception as e:
-        log_fn(f"  ERROR: {e}")
-        return None
+    for attempt in range(_GATEWAY_TIMEOUT_RETRIES + 1):
+        try:
+            chunks: list[str] = []
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("type") == "content_block_delta":
+                        delta = event.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            chunks.append(delta.get("text", ""))
+            return "".join(chunks) or None
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            if e.code in _RETRYABLE_HTTP_CODES and attempt < _GATEWAY_TIMEOUT_RETRIES:
+                log_fn(f"  API HTTP {e.code} (gateway timeout), retrying in {_GATEWAY_TIMEOUT_BACKOFF_SECONDS}s...")
+                time.sleep(_GATEWAY_TIMEOUT_BACKOFF_SECONDS)
+                continue
+            log_fn(f"  ERROR: API HTTP {e.code}: {body[:300]}")
+            return None
+        except urllib.error.URLError as e:
+            log_fn(f"  ERROR: API request failed: {e.reason}")
+            return None
+        except Exception as e:
+            log_fn(f"  ERROR: {e}")
+            return None
+    return None
 
 
 # ---------------------------------------------------------------------------
