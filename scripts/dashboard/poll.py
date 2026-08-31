@@ -105,32 +105,45 @@ def _collect_member(
         )
 
     # 5. AI review for PRs
+    # On failure, deliberately do NOT call mark_pr_reviewed() — that would
+    # store the current updated_at as if this run succeeded, and the item
+    # would never be retried since the cheap "did it change" check would no
+    # longer see a mismatch. restore_pr_review() still populates whatever
+    # was last known-good (or "pending" if never successful) for this run's
+    # dashboard render, without touching stored state.
     all_prs = prs_created + review_requests
     for pr in all_prs:
         if st.pr_needs_review(pr, current_state):
             log_fn(f"  NEW/UPDATED PR: {pr.repo}#{pr.number} — {pr.title}")
             gh.fetch_pr_details(pr, log_fn=log_fn)  # get head/base refs
             gh.fetch_pr_diff(pr, log_fn=log_fn)
-            ai_review.review_pr(pr, log_fn=log_fn)
-            st.mark_pr_reviewed(pr, current_state)
+            if ai_review.review_pr(pr, log_fn=log_fn):
+                st.mark_pr_reviewed(pr, current_state)
+            else:
+                log_fn(f"  Review failed, will retry next run: {pr.repo}#{pr.number}")
+                st.restore_pr_review(pr, current_state)
         else:
             log_fn(f"  NO CHANGE: {pr.repo}#{pr.number}")
             st.restore_pr_review(pr, current_state)
 
-    # 6. AI triage for GitHub issues
+    # 6. AI triage for GitHub issues (same failure handling as above)
     for issue in issues:
         if st.issue_needs_triage(issue, current_state):
             log_fn(f"  NEW/UPDATED issue: {issue.repo}#{issue.number} — {issue.title}")
             gh.fetch_issue_body(issue, log_fn=log_fn)
-            ai_review.triage_issue(issue, log_fn=log_fn)
-            st.mark_issue_triaged(issue, current_state)
+            if ai_review.triage_issue(issue, log_fn=log_fn):
+                st.mark_issue_triaged(issue, current_state)
+            else:
+                log_fn(f"  Triage failed, will retry next run: {issue.repo}#{issue.number}")
+                st.restore_issue_triage(issue, current_state)
         else:
             log_fn(f"  NO CHANGE: {issue.repo}#{issue.number}")
             st.restore_issue_triage(issue, current_state)
 
     # 7. AI triage for Jira issues (two-tier gating — see state.py docstrings:
     #    cheap tier on `updated`, then a content-hash tier so metadata-only
-    #    touches like a label/sprint change don't trigger a wasted AI call)
+    #    touches like a label/sprint change don't trigger a wasted AI call.
+    #    Same failure handling as above: no mark_*_triaged() on failure.)
     for jira_issue in jira_issues:
         if st.jira_issue_needs_triage(jira_issue, current_state):
             jira_client.fetch_issue_context(jira_issue, log_fn=log_fn)
@@ -140,8 +153,11 @@ def _collect_member(
                 st.mark_jira_issue_seen(jira_issue, current_state)
             else:
                 log_fn(f"  NEW/UPDATED Jira: {jira_issue.key} — {jira_issue.summary}")
-                ai_review.triage_jira_issue(jira_issue, log_fn=log_fn)
-                st.mark_jira_issue_triaged(jira_issue, current_state)
+                if ai_review.triage_jira_issue(jira_issue, log_fn=log_fn):
+                    st.mark_jira_issue_triaged(jira_issue, current_state)
+                else:
+                    log_fn(f"  Triage failed, will retry next run: {jira_issue.key}")
+                    st.restore_jira_issue_triage(jira_issue, current_state)
         else:
             log_fn(f"  NO CHANGE: {jira_issue.key}")
             st.restore_jira_issue_triage(jira_issue, current_state)
