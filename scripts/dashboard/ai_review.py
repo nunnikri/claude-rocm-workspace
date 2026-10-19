@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -44,9 +45,12 @@ def _rel(path: Path) -> str:
 _GATEWAY_TIMEOUT_RETRIES = 2
 _GATEWAY_TIMEOUT_BACKOFF_SECONDS = 10
 _RETRYABLE_HTTP_CODES = {502, 503, 504}
+_DEFAULT_MAX_TOKENS = 3000
 
 
-def _call_api(prompt: str, model: str, log_fn=print) -> str | None:
+def _call_api(
+    prompt: str, model: str, max_tokens: int = _DEFAULT_MAX_TOKENS, log_fn=print
+) -> str | None:
     """
     POST to Anthropic Messages API using streaming (text/event-stream).
 
@@ -68,7 +72,7 @@ def _call_api(prompt: str, model: str, log_fn=print) -> str | None:
 
     payload = json.dumps({
         "model": model,
-        "max_tokens": 3000,
+        "max_tokens": max_tokens,
         "stream": True,   # streaming: tokens arrive incrementally, proxy stays alive
         "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
@@ -127,6 +131,7 @@ def _call_api(prompt: str, model: str, log_fn=print) -> str | None:
 # ---------------------------------------------------------------------------
 
 _GUIDELINES_LIMIT = 2000   # keep prompt under AMD proxy timeout budget
+_REVIEW_MAX_TOKENS = 8000  # a thorough multi-section review needs more room than triage
 
 
 def _pr_review_prompt(pr: PR, guidelines: str) -> str:
@@ -142,12 +147,37 @@ def _pr_review_prompt(pr: PR, guidelines: str) -> str:
         f"Branch: {pr.head_ref} → {pr.base_ref}\n\n"
         f"## Unified diff\n\n```diff\n{pr.diff or '(diff not available)'}\n```\n\n"
         f"---\n\n"
+        f"IMPORTANT: Only comment on files and lines that literally appear in the diff "
+        f"above. Never invent, assume, or infer the existence of other files, functions, "
+        f"or content you have not seen. If the diff above notes that files were omitted "
+        f"or truncated, say so explicitly in your review instead of describing content "
+        f"from those files. If the diff is empty or unavailable, say that plainly rather "
+        f"than fabricating a review.\n\n"
         f"Write a thorough code review in markdown covering correctness, style, tests, "
         f"and architecture. Use severity markers: ❌ BLOCKING, ⚠️ IMPORTANT, "
         f"💡 SUGGESTION, 📋 FUTURE WORK.\n\n"
         f"Sections: Problem, Summary of changes, Overall Assessment (APPROVED / "
         f"CHANGES REQUESTED / REJECTED), Detailed Review, Recommendations, Conclusion."
     )
+
+
+_CITED_FILE_RE = re.compile(
+    r"`([\w./-]+\.(?:py|sh|ps1|yml|yaml|cmake|txt|md|json|toml|ini|cfg"
+    r"|c|cc|cpp|h|hpp|j2))`"
+)
+_DIFF_FILE_RE = re.compile(r"^diff --git a/(\S+) b/\S+$", re.MULTILINE)
+
+
+def _hallucinated_files(review_text: str, diff: str) -> list[str]:
+    """
+    File basenames the review cites (in backticks) that don't appear anywhere
+    in the diff it was actually given. Catches the model inventing plausible
+    files instead of restricting itself to what the diff showed — a real
+    failure mode when the diff was truncated or atypically small.
+    """
+    real = {Path(m).name for m in _DIFF_FILE_RE.findall(diff)}
+    cited = {Path(m).name for m in _CITED_FILE_RE.findall(review_text)}
+    return sorted(cited - real)
 
 
 def review_pr(pr: PR, log_fn=print) -> bool:
@@ -166,10 +196,24 @@ def review_pr(pr: PR, log_fn=print) -> bool:
     prompt = _pr_review_prompt(pr, guidelines)
     log_fn(f"  Reviewing {pr.repo}#{pr.number} ({len(prompt)} chars, model: {model})")
 
-    text = _call_api(prompt, model, log_fn=log_fn)
+    text = _call_api(prompt, model, max_tokens=_REVIEW_MAX_TOKENS, log_fn=log_fn)
     if text is None:
         pr.review_status = "failed"
         return False
+
+    hallucinated = _hallucinated_files(text, pr.diff or "")
+    if hallucinated:
+        log_fn(
+            f"  WARNING: review cites file(s) not present in the diff it was given: "
+            f"{', '.join(hallucinated)}"
+        )
+        cited_list = ", ".join(f"`{f}`" for f in hallucinated)
+        text = (
+            f"> ⚠️ **Auto-review integrity warning**: this review references file(s) "
+            f"not found in the diff it was given: {cited_list}. Treat any findings "
+            f"about these file(s) as unverified — likely hallucinated rather than "
+            f"based on the actual PR content.\n\n"
+        ) + text
 
     review_dir = REVIEWS_DIR / date.today().isoformat()
     review_dir.mkdir(parents=True, exist_ok=True)
