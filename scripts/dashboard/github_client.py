@@ -16,7 +16,6 @@ Lessons from auto_review/poll_and_review.py:
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 import tempfile
@@ -296,44 +295,13 @@ def fetch_assigned_issues(user: str, repos: list[str], log_fn=print) -> list[Iss
 
 def fetch_pr_diff(pr: PR, log_fn=print) -> None:
     """
-    Populate pr.diff in-place, truncated to stay under the AMD proxy timeout.
+    Populate pr.diff in-place with the full, untruncated unified diff.
 
-    Truncation happens on a `diff --git` file boundary rather than a raw
-    character cut, so a model reviewing the result never sees a file sliced
-    off mid-content — it either sees a complete file's diff or none of it.
+    A diff too large for one review API call is split into multiple chunks
+    by ai_review.review_pr (at `diff --git` file boundaries) rather than
+    being truncated here, so no file's content is ever dropped.
     """
-    diff = _gh_pr_diff(pr.repo, pr.number, log_fn=log_fn)
-    MAX = 30_000
-    if len(diff) <= MAX:
-        pr.diff = diff
-        return
-
-    file_starts = [m.start() for m in re.finditer(r"^diff --git ", diff, re.MULTILINE)]
-    if not file_starts:
-        # No recognizable file boundaries (unexpected diff format) — fall back
-        # to a raw cut rather than silently discarding the entire diff.
-        pr.diff = diff[:MAX].rstrip() + f"\n\n[... truncated at {MAX} chars (no file boundaries found) ...]"
-        return
-
-    file_bounds = file_starts + [len(diff)]  # bounds[i+1] = end of file i
-
-    # Keep only complete per-file diffs that fit within MAX; a file whose
-    # own diff doesn't fit is dropped entirely rather than sliced mid-content.
-    cutoff = 0
-    files_kept = 0
-    for i in range(len(file_starts)):
-        file_end = file_bounds[i + 1]
-        if file_end > MAX:
-            break
-        cutoff = file_end
-        files_kept += 1
-
-    omitted_files = len(file_starts) - files_kept
-    pr.diff = (
-        diff[:cutoff].rstrip()
-        + f"\n\n[... {omitted_files} more changed file(s) omitted "
-        f"({len(diff) - cutoff} chars) to stay under the proxy timeout ...]"
-    )
+    pr.diff = _gh_pr_diff(pr.repo, pr.number, log_fn=log_fn)
 
 
 def fetch_issue_body(issue: Issue, log_fn=print) -> None:

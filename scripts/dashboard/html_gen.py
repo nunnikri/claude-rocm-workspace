@@ -30,6 +30,7 @@ _STATUS_BADGE = {
     "reviewed":  ('<span class="badge badge-ok">✅ reviewed</span>', True),
     "triaged":   ('<span class="badge badge-ok">✅ triaged</span>',  True),
     "failed":    ('<span class="badge badge-err">❌ failed</span>',  False),
+    "partial":   ('<span class="badge badge-warn">⚠️ partial review</span>', False),
     "pending":   ('<span class="badge badge-warn">⏳ pending</span>', False),
     "":          ('<span class="badge badge-warn">⏳ pending</span>', False),
 }

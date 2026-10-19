@@ -20,6 +20,8 @@ import re
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from config import (
@@ -130,8 +132,10 @@ def _call_api(
 # PR review
 # ---------------------------------------------------------------------------
 
-_GUIDELINES_LIMIT = 2000   # keep prompt under AMD proxy timeout budget
-_REVIEW_MAX_TOKENS = 8000  # a thorough multi-section review needs more room than triage
+_GUIDELINES_LIMIT = 2000       # keep prompt under AMD proxy timeout budget
+_REVIEW_MAX_TOKENS = 8000      # a thorough multi-section review needs more room than triage
+_SYNTHESIS_MAX_TOKENS = 2000   # synthesis only writes 5 short wrapper sections
+_DIFF_CHUNK_MAX_CHARS = 30_000  # safe per-call diff budget (AMD proxy gateway timeout risk)
 
 
 def _pr_review_prompt(pr: PR, guidelines: str) -> str:
@@ -180,19 +184,27 @@ def _hallucinated_files(review_text: str, diff: str) -> list[str]:
     return sorted(cited - real)
 
 
-def review_pr(pr: PR, log_fn=print) -> bool:
-    """
-    Generate AI review for a PR and write to reviews/<date>/pr_<repo>_<number>.md.
-    Sets pr.review_file and pr.review_status in-place.
-    """
-    from datetime import date
+def _hallucination_banner(hallucinated: list[str], scope: str) -> str:
+    cited_list = ", ".join(f"`{f}`" for f in hallucinated)
+    return (
+        f"> ⚠️ **Auto-review integrity warning**: {scope} references file(s) not "
+        f"found in the diff it was given: {cited_list}. Treat any findings about "
+        f"these file(s) as unverified — likely hallucinated rather than based on "
+        f"the actual PR content.\n\n"
+    )
 
-    acfg = anthropic_config()
-    model = acfg["model_review"]
 
-    guidelines_path = Path(__file__).parent.parent.parent / "reviews" / "REVIEW_GUIDELINES.md"
-    guidelines = guidelines_path.read_text(encoding="utf-8") if guidelines_path.exists() else ""
+def _write_review_file(pr: PR, text: str) -> Path:
+    review_dir = REVIEWS_DIR / date.today().isoformat()
+    review_dir.mkdir(parents=True, exist_ok=True)
+    repo_short = pr.repo.split("/")[-1]
+    review_file = review_dir / f"pr_{repo_short}_{pr.number}.md"
+    review_file.write_text(text, encoding="utf-8")
+    return review_file
 
+
+def _review_pr_single_call(pr: PR, guidelines: str, model: str, log_fn=print) -> bool:
+    """The whole diff fits in one call: today's original review flow, unchanged."""
     prompt = _pr_review_prompt(pr, guidelines)
     log_fn(f"  Reviewing {pr.repo}#{pr.number} ({len(prompt)} chars, model: {model})")
 
@@ -207,24 +219,348 @@ def review_pr(pr: PR, log_fn=print) -> bool:
             f"  WARNING: review cites file(s) not present in the diff it was given: "
             f"{', '.join(hallucinated)}"
         )
-        cited_list = ", ".join(f"`{f}`" for f in hallucinated)
-        text = (
-            f"> ⚠️ **Auto-review integrity warning**: this review references file(s) "
-            f"not found in the diff it was given: {cited_list}. Treat any findings "
-            f"about these file(s) as unverified — likely hallucinated rather than "
-            f"based on the actual PR content.\n\n"
-        ) + text
+        text = _hallucination_banner(hallucinated, "this review") + text
 
-    review_dir = REVIEWS_DIR / date.today().isoformat()
-    review_dir.mkdir(parents=True, exist_ok=True)
-    repo_short = pr.repo.split("/")[-1]
-    review_file = review_dir / f"pr_{repo_short}_{pr.number}.md"
-    review_file.write_text(text, encoding="utf-8")
-
+    review_file = _write_review_file(pr, text)
     pr.review_file = _rel(review_file)
     pr.review_status = "reviewed"
     log_fn(f"  Written: {review_file}")
     return True
+
+
+# ---------------------------------------------------------------------------
+# Chunked PR review (diff too large for one call)
+# ---------------------------------------------------------------------------
+
+def _split_diff_into_chunks(diff: str, max_chars: int = _DIFF_CHUNK_MAX_CHARS) -> list[str]:
+    """
+    Split a unified diff into chunks at `diff --git` file boundaries, packing
+    greedily in original order so every file lands in exactly one chunk —
+    none dropped. A single file whose own diff exceeds max_chars gets its
+    own oversized chunk rather than being split mid-file or dropped: hunk-
+    splitting one file across two review calls risks contradictory findings
+    from reviewing each half with no visibility into the other, which is a
+    worse failure mode than one oversized prompt (empirically still safe —
+    see _call_api's gateway-timeout retry and the ~55K-char diffs reviewed
+    successfully in one call during development of this feature).
+    """
+    if not diff:
+        return []
+    if len(diff) <= max_chars:
+        return [diff]
+
+    file_starts = [m.start() for m in re.finditer(r"^diff --git ", diff, re.MULTILINE)]
+    if not file_starts:
+        # No recognizable file boundaries (unexpected diff format) — treat
+        # as a single chunk rather than guessing a split point.
+        return [diff]
+
+    file_bounds = file_starts + [len(diff)]
+    segments = [diff[file_starts[i] : file_bounds[i + 1]] for i in range(len(file_starts))]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for segment in segments:
+        if current and current_len + len(segment) > max_chars:
+            chunks.append("".join(current))
+            current = []
+            current_len = 0
+        current.append(segment)
+        current_len += len(segment)
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
+@dataclass
+class _ChunkResult:
+    index: int        # 1-based
+    total: int
+    files: list[str]
+    diff: str
+    text: str | None  # None if this chunk's API call failed
+
+
+def _chunk_review_prompt(pr: PR, guidelines: str, chunk_diff: str, index: int, total: int) -> str:
+    return (
+        f"You are performing a code review for a ROCm build infrastructure PR.\n\n"
+        f"## Review guidelines (excerpt)\n\n{guidelines[:_GUIDELINES_LIMIT]}\n\n"
+        f"---\n\n"
+        f"## PR details\n\n"
+        f"URL: {pr.url}\n"
+        f"Repository: {pr.repo}\n"
+        f"PR #{pr.number}: {pr.title}\n"
+        f"Author: {pr.author}\n"
+        f"Branch: {pr.head_ref} → {pr.base_ref}\n\n"
+        f"This PR's diff was too large to review in one pass and was split into "
+        f"{total} parts by file. This is PART {index} of {total}.\n\n"
+        f"## Unified diff — part {index} of {total}\n\n```diff\n{chunk_diff}\n```\n\n"
+        f"---\n\n"
+        f"IMPORTANT: Only comment on files and lines that literally appear in the diff "
+        f"above. Never invent, assume, or infer the existence of other files, functions, "
+        f"or content — including content you'd expect in the OTHER parts of this PR "
+        f"that you have not seen here. Do not speculate about what other parts contain.\n\n"
+        f"First, in 2-4 sentences under a `#### What this part changes` heading, "
+        f"explain what these files change and how they relate to each other — "
+        f"e.g. if one file's change only makes sense in light of another change "
+        f"in this SAME part's diff, say so explicitly. Use this to understand the "
+        f"change as a whole before judging any individual line, so you don't flag "
+        f"something as broken when a nearby hunk in this same diff already explains "
+        f"or completes it.\n\n"
+        f"Then write detailed findings, grouped by file under a `### <filename>` "
+        f"heading, using severity markers: ❌ BLOCKING, ⚠️ IMPORTANT, 💡 SUGGESTION, "
+        f"📋 FUTURE WORK. Cover correctness, style, tests, and architecture for the "
+        f"files in this part only.\n\n"
+        f"Do NOT include a Problem, Summary, Overall Assessment, or Conclusion "
+        f"section — those are written separately once every part has been reviewed. "
+        f"Just the short explanation above, then the per-file detailed findings."
+    )
+
+
+def _synthesis_prompt(pr: PR, guidelines: str, chunk_texts: list[str]) -> str:
+    parts_text = "\n\n".join(
+        f"### Part {i + 1} findings\n\n{text}" for i, text in enumerate(chunk_texts)
+    )
+    return (
+        f"You are finishing a code review for a ROCm build infrastructure PR. Its "
+        f"diff was too large for one review call, so it was split into "
+        f"{len(chunk_texts)} part(s), each already reviewed in detail below. Your "
+        f"only job is to write the wrapper sections from those findings — do not "
+        f"re-review the code or invent any new findings not already present below.\n\n"
+        f"## Review guidelines (excerpt)\n\n{guidelines[:_GUIDELINES_LIMIT]}\n\n"
+        f"---\n\n"
+        f"## PR details\n\n"
+        f"URL: {pr.url}\n"
+        f"Repository: {pr.repo}\n"
+        f"PR #{pr.number}: {pr.title}\n"
+        f"Author: {pr.author}\n"
+        f"Branch: {pr.head_ref} → {pr.base_ref}\n\n"
+        f"## Findings already written for each part\n\n{parts_text}\n\n"
+        f"---\n\n"
+        f"Based strictly on the findings above, write markdown with exactly these "
+        f"5 sections, each starting with a `## ` heading spelled exactly as shown: "
+        f"`## Problem`, `## Summary of changes`, `## Overall Assessment` (APPROVED / "
+        f"CHANGES REQUESTED / REJECTED), `## Recommendations`, `## Conclusion`. If "
+        f"ANY finding above is marked ❌ BLOCKING, Overall Assessment must not be "
+        f"APPROVED. Do not repeat the detailed per-file findings themselves — those "
+        f"are included separately in the final document."
+    )
+
+
+_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _split_sections(text: str) -> dict[str, str]:
+    """Split markdown into {heading title: body} by level-2 `## ` headings."""
+    matches = list(_SECTION_RE.finditer(text))
+    sections: dict[str, str] = {}
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        sections[m.group(1).strip()] = text[start:end].strip()
+    return sections
+
+
+def _deterministic_file_list(diff: str) -> str:
+    files = _DIFF_FILE_RE.findall(diff)
+    return "\n".join(f"- `{f}`" for f in files) if files else "(no files found)"
+
+
+def _assemble_chunked_review(
+    pr: PR,
+    chunk_results: list[_ChunkResult],
+    synthesis_text: str | None,
+    synthesis_hallucinated: list[str],
+    full_diff: str,
+) -> str:
+    total = len(chunk_results)
+    failed = [c for c in chunk_results if c.text is None]
+    any_failed = bool(failed)
+    any_blocking = any(c.text and "❌" in c.text for c in chunk_results)
+
+    sections = _split_sections(synthesis_text) if synthesis_text else {}
+    synthesis_degraded = synthesis_text is not None and not sections
+
+    problem = sections.get("Problem") or (
+        f"(Synthesis unavailable — this PR's diff ({len(full_diff)} chars) was "
+        f"split into {total} part(s); see Detailed Review below for per-file "
+        f"findings.)"
+    )
+    summary = sections.get("Summary of changes") or (
+        "Files changed:\n\n" + _deterministic_file_list(full_diff)
+    )
+    recommendations = sections.get("Recommendations") or (
+        "See ❌ BLOCKING / ⚠️ IMPORTANT items in the per-part findings below."
+    )
+    conclusion = sections.get("Conclusion") or (
+        "(Synthesis unavailable — review the per-part findings below directly.)"
+    )
+
+    if any_failed:
+        assessment = (
+            "⚠️ **INCOMPLETE — partial review** (see banner above; the missing "
+            "part(s) will be retried automatically on the next run)"
+        )
+    else:
+        assessment = sections.get("Overall Assessment") or (
+            ("⚠️ **CHANGES REQUESTED** (auto-fallback: synthesis unavailable, but "
+             "❌ BLOCKING items were found below)")
+            if any_blocking else
+            "⚠️ **NEEDS MANUAL REVIEW** (auto-fallback: synthesis unavailable)"
+        )
+
+    lines = [
+        f"# PR Review: {pr.repo}#{pr.number} — {pr.title}",
+        "",
+        f"**Author:** {pr.author}  **Branch:** {pr.head_ref} → {pr.base_ref}  "
+        f"**URL:** {pr.url}",
+        "",
+    ]
+
+    if any_failed:
+        failed_files = sorted({f for c in failed for f in c.files})
+        lines += [
+            f"> ⚠️ **PARTIAL REVIEW** — {len(failed)} of {total} part(s) failed to "
+            f"review (API error): {', '.join(failed_files) or '(unknown files)'}. "
+            f"This will be retried automatically on the next run.",
+            "",
+        ]
+    if synthesis_hallucinated:
+        lines += [_hallucination_banner(synthesis_hallucinated, "the synthesized summary"), ""]
+    if synthesis_text is None:
+        lines += [
+            "> _(Synthesis call failed — wrapper sections below are a mechanical "
+            "fallback; see Detailed Review for full findings.)_",
+            "",
+        ]
+    elif synthesis_degraded:
+        lines += [
+            "> _(Synthesis call returned unexpected formatting — wrapper sections "
+            "below are a mechanical fallback; see Detailed Review for full "
+            "findings.)_",
+            "",
+        ]
+
+    lines += [
+        "## Problem", "", problem, "",
+        "## Summary of changes", "", summary, "",
+        "## Overall Assessment", "", assessment, "",
+        "## Detailed Review", "",
+    ]
+
+    for c in chunk_results:
+        file_list = ", ".join(c.files) if c.files else "(unknown files)"
+        lines.append(f"### Part {c.index} of {c.total} — files: {file_list}")
+        lines.append("")
+        if c.text is None:
+            lines.append(
+                f"❌ **This part failed to review** (API error) — {file_list} was "
+                f"not reviewed. This will be retried automatically on the next run."
+            )
+        else:
+            lines.append(c.text.strip())
+        lines += ["", "---", ""]
+
+    lines += [
+        "## Recommendations", "", recommendations, "",
+        "## Conclusion", "", conclusion, "",
+        "---", "",
+        f"*This review was generated in {total} part(s) because the diff "
+        f"({len(full_diff)} chars across {len(_DIFF_FILE_RE.findall(full_diff))} "
+        f"files) exceeded the {_DIFF_CHUNK_MAX_CHARS}-char per-call budget.*",
+    ]
+    return "\n".join(lines)
+
+
+def _review_pr_chunked(
+    pr: PR, guidelines: str, model: str, chunks: list[str], log_fn=print
+) -> bool:
+    total = len(chunks)
+    log_fn(
+        f"  Diff too large for one call ({len(pr.diff or '')} chars) — "
+        f"splitting into {total} part(s)"
+    )
+
+    chunk_results: list[_ChunkResult] = []
+    for i, chunk_diff in enumerate(chunks, start=1):
+        files = _DIFF_FILE_RE.findall(chunk_diff)
+        prompt = _chunk_review_prompt(pr, guidelines, chunk_diff, i, total)
+        log_fn(f"  Reviewing part {i}/{total} ({len(prompt)} chars, {len(files)} file(s))")
+        text = _call_api(prompt, model, max_tokens=_REVIEW_MAX_TOKENS, log_fn=log_fn)
+        if text is not None:
+            hallucinated = _hallucinated_files(text, chunk_diff)
+            if hallucinated:
+                log_fn(
+                    f"  WARNING: part {i} cites file(s) not present in its diff: "
+                    f"{', '.join(hallucinated)}"
+                )
+                text = _hallucination_banner(hallucinated, f"this part ({i}/{total})") + text
+        else:
+            log_fn(f"  Part {i}/{total} failed, will retry on next run")
+        chunk_results.append(
+            _ChunkResult(index=i, total=total, files=files, diff=chunk_diff, text=text)
+        )
+
+    if all(c.text is None for c in chunk_results):
+        pr.review_status = "failed"
+        return False
+
+    succeeded_texts = [c.text for c in chunk_results if c.text is not None]
+    log_fn(f"  Synthesizing final review from {len(succeeded_texts)}/{total} part(s)")
+    synthesis_prompt = _synthesis_prompt(pr, guidelines, succeeded_texts)
+    synthesis_text = _call_api(
+        synthesis_prompt, model, max_tokens=_SYNTHESIS_MAX_TOKENS, log_fn=log_fn
+    )
+    synthesis_hallucinated: list[str] = []
+    if synthesis_text is not None:
+        synthesis_hallucinated = _hallucinated_files(synthesis_text, pr.diff or "")
+        if synthesis_hallucinated:
+            log_fn(
+                f"  WARNING: synthesis cites file(s) not present in the diff: "
+                f"{', '.join(synthesis_hallucinated)}"
+            )
+    else:
+        log_fn("  Synthesis call failed, using mechanical fallback for wrapper sections")
+
+    text = _assemble_chunked_review(
+        pr, chunk_results, synthesis_text, synthesis_hallucinated, pr.diff or ""
+    )
+    review_file = _write_review_file(pr, text)
+    pr.review_file = _rel(review_file)
+
+    if any(c.text is None for c in chunk_results):
+        pr.review_status = "partial"
+        log_fn(f"  Written (partial — will retry): {review_file}")
+        return False
+
+    pr.review_status = "reviewed"
+    log_fn(f"  Written: {review_file}")
+    return True
+
+
+def review_pr(pr: PR, log_fn=print) -> bool:
+    """
+    Generate AI review for a PR and write to reviews/<date>/pr_<repo>_<number>.md.
+    Sets pr.review_file and pr.review_status in-place ("reviewed" / "failed" /
+    "partial" — the latter when the diff needed multiple parts and at least
+    one part's API call failed; poll.py retries on any non-True return).
+
+    Diffs that fit the per-call budget use one API call (_review_pr_single_call).
+    Larger diffs are split at file boundaries into multiple parts, each
+    reviewed separately and then synthesized into one coherent review
+    (_review_pr_chunked), so no file is ever dropped from review.
+    """
+    acfg = anthropic_config()
+    model = acfg["model_review"]
+
+    guidelines_path = Path(__file__).parent.parent.parent / "reviews" / "REVIEW_GUIDELINES.md"
+    guidelines = guidelines_path.read_text(encoding="utf-8") if guidelines_path.exists() else ""
+
+    chunks = _split_diff_into_chunks(pr.diff or "")
+    if len(chunks) <= 1:
+        return _review_pr_single_call(pr, guidelines, model, log_fn)
+    return _review_pr_chunked(pr, guidelines, model, chunks, log_fn)
 
 
 # ---------------------------------------------------------------------------
